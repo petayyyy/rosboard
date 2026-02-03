@@ -27,8 +27,16 @@ class Viewer {
     // card title div
     card.title = $('<div></div>').addClass('card-title').text("Waiting for data ...").appendTo(card);
 
-    // card content div
-    card.content = $('<div></div>').addClass('card-content').text('').appendTo(card);
+    // card content div — scrollbars when content doesn't fit (vertical and horizontal)
+    card.content = $('<div></div>')
+      .addClass('card-content')
+      .css({
+        'overflow-x': 'auto',
+        'overflow-y': 'auto',
+        'max-height': '75vh'
+      })
+      .text('')
+      .appendTo(card);
 
     // card pause button
     let menuId = 'menu-' + Math.floor(Math.random() * 1e6);

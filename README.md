@@ -24,25 +24,9 @@ sudo pip3 install tornado
 sudo pip3 install simplejpeg  # recommended, but ROSboard can fall back to cv2 or PIL instead
 ```
 
-If you intend to use this with melodic or earlier, you also need `rospkg` to allow python3 ROS1 nodes to work.
-```
-sudo pip3 install rospkg      # required for melodic and earlier distros
-```
-
-## Running it the easy way (without installing it into a workspace)
-
-```
-source /opt/ros/YOUR_ROS1_OR_ROS2_DISTRO/setup.bash
-./run
-```
-
-Point your web browser at http://localhost:8888 (or replace localhost with your robot's IP) and you're good to go.
-
 ## Installing it as a ROS package
 
-This ROS package should work in either ROS1 or ROS2. Simply drop it into your `catkin_ws/src/` or `colcon_ws/src/` and it should just work.
-
-For ROS 1, run it with `rosrun rosboard rosboard_node` or put it in your launch file.
+This ROS package should work in either ROS1 or ROS2. Simply drop it into your or `colcon_ws/src/` and it should just work.
 
 For ROS 2, run it with `ros2 run rosboard rosboard_node` or put it in your launch file.
 
