@@ -240,6 +240,20 @@ class Space3DViewer extends Viewer {
         let points = drawObject.data;
         drawObjectsGl.push({type: "points", mesh: GL.Mesh.load({vertices: points, colors: colors}, null, null, this.gl)});
       }
+      if(drawObject.type === "lines") {
+        let vertices = drawObject.data;
+        let colors = drawObject.colors;
+
+        let mesh = GL.Mesh.load(
+          { vertices: vertices, colors: colors },
+          null,
+          null,
+          this.gl
+        );
+
+  drawObjectsGl.push({ type: "lines", mesh: mesh });
+}
+
     }
     this.drawObjectsGl = drawObjectsGl;
   }
@@ -251,3 +265,5 @@ Space3DViewer.supportedTypes = [
 Space3DViewer.maxUpdateRate = 10.0;
 
 Viewer.registerViewer(Space3DViewer);
+
+// v2.0
