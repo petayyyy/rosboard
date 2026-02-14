@@ -295,8 +295,8 @@ class Space2DViewer extends Viewer {
       } else if(drawObject.type === "points") {
         this.ctx.fillStyle = drawObject.color || "#e0e0e0";
         for(let i=0; i < drawObject.data.length / 2; i++) {
-          if(drawObject.data[2*i] == NaN) continue;
-          if(drawObject.data[2*i+1] == NaN) continue;
+          if(isNaN(drawObject.data[2*i])) continue;
+          if(isNaN(drawObject.data[2*i+1])) continue;
           let px = x2px(drawObject.data[2*i])-1;
           let py = y2py(drawObject.data[2*i+1])-1;
           if(px < -1) continue;

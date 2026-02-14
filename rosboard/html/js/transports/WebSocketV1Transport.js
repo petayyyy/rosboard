@@ -1,9 +1,9 @@
 class WebSocketV1Transport {
-    constructor({path, onOpen, onClose, onRosMsg, onTopics, onSystem}) {
+    constructor({path, onOpen, onClose, onMsg, onRosMsg, onTopics, onSystem}) {
       this.path = path;
       this.onOpen = onOpen ? onOpen.bind(this) : null;
       this.onClose = onClose ? onClose.bind(this) : null;
-      this.onMsg = onMsg ? onMsg.bind(this) : null;
+      this.onMsg = (onMsg || onRosMsg) ? (onMsg || onRosMsg).bind(this) : null;
       this.onTopics = onTopics ? onTopics.bind(this) : null;
       this.onSystem = onSystem ? onSystem.bind(this) : null;
       this.ws = null;

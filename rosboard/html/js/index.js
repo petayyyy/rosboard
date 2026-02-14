@@ -303,7 +303,7 @@ Viewer.onClose = function(viewerInstance) {
 Viewer.onSwitchViewer = (viewerInstance, newViewerType) => {
   let topicName = viewerInstance.topicName;
   let topicType = viewerInstance.topicType;
-  if(!subscriptions[topicName].viewer === viewerInstance) console.error("viewerInstance does not match subscribed instance");
+  if(subscriptions[topicName].viewer !== viewerInstance) console.error("viewerInstance does not match subscribed instance");
   let card = subscriptions[topicName].viewer.card;
   subscriptions[topicName].viewer.destroy();
   delete(subscriptions[topicName].viewer);
