@@ -88,6 +88,19 @@ class TFViewer extends Viewer {
     this.showArucoCheckbox = $('<input type="checkbox" checked>').appendTo(arucoLabel);
     $('<span></span>').addClass("monospace").css({"opacity": 0.6}).text("aruco").appendTo(arucoLabel);
 
+    // Camera mode toggle: orbit / fly
+    this.cameraMode = 'orbit';
+    this.cameraModeBtn = $('<button></button>').css({
+      "font-size": "9px", "padding": "1px 6px",
+      "background": "#444", "color": "#ccc",
+      "border": "1px solid #666", "border-radius": "3px", "cursor": "pointer",
+      "font-family": "'JetBrains Mono', monospace",
+    }).text("orbit").appendTo(this.controlsBar);
+    let that2 = this;
+    this.cameraModeBtn.on("click", function() {
+      that2._toggleCameraMode();
+    });
+
     this.frameCountLabel = $('<span></span>').addClass("monospace").css({"opacity": 0.4, "margin-left": "auto"}).appendTo(this.controlsBar);
 
     // Collapsible child frames
@@ -207,11 +220,19 @@ class TFViewer extends Viewer {
     // Render loop
     let that = this;
     let lastLabelTime = 0;
+    let lastFrameTime = performance.now();
     let animate = () => {
       that._animFrameId = requestAnimationFrame(animate);
-      that.orbitControls.update();
-      that.renderer.render(that.scene, that.camera);
       let now = performance.now();
+      let delta = Math.min((now - lastFrameTime) / 1000, 0.1); // seconds, capped
+      lastFrameTime = now;
+
+      if (that.cameraMode === 'fly') {
+        that._updateFlyMovement(delta);
+      } else {
+        that.orbitControls.update();
+      }
+      that.renderer.render(that.scene, that.camera);
       if (now - lastLabelTime > 50) {
         lastLabelTime = now;
         that._updateLabels();
@@ -247,6 +268,148 @@ class TFViewer extends Viewer {
     geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
     this.scene.add(new THREE.LineSegments(geo,
       new THREE.LineBasicMaterial({ color: 0x334466, transparent: true, opacity: 0.3 })));
+  }
+
+  // ── Camera Mode (Orbit / Fly) ──────────────────────────────
+
+  _toggleCameraMode() {
+    if (this.cameraMode === 'orbit') {
+      this._enableFlyMode();
+    } else {
+      this._enableOrbitMode();
+    }
+  }
+
+  _enableOrbitMode() {
+    this.cameraMode = 'orbit';
+    this.cameraModeBtn.text('orbit').css({"background": "#444"});
+    this.orbitControls.enabled = true;
+    this._cleanupFlyMode();
+  }
+
+  _enableFlyMode() {
+    this.cameraMode = 'fly';
+    this.cameraModeBtn.text('fly').css({"background": "#335"});
+    this.orbitControls.enabled = false;
+    this._initFlyMode();
+  }
+
+  _initFlyMode() {
+    let that = this;
+    this._flyKeys = {};
+    this._flySpeed = 3.0;
+    this._flyDragging = false;
+    this._flyLastMouse = { x: 0, y: 0 };
+
+    // Extract current yaw/pitch from camera direction (Z-up world)
+    let dir = new THREE.Vector3();
+    this.camera.getWorldDirection(dir);
+    this._flyYaw = Math.atan2(dir.y, dir.x);
+    this._flyPitch = Math.asin(Math.max(-0.999, Math.min(0.999, dir.z)));
+    this._applyFlyCamera();
+
+    this._flyOnKeyDown = (e) => {
+      that._flyKeys[e.code] = true;
+      if (['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','Space','ShiftLeft','ShiftRight'].includes(e.code)) {
+        e.preventDefault();
+      }
+    };
+    this._flyOnKeyUp = (e) => { that._flyKeys[e.code] = false; };
+
+    this._flyOnMouseDown = (e) => {
+      if (e.button === 0 || e.button === 2) {
+        that._flyDragging = true;
+        that._flyLastMouse = { x: e.clientX, y: e.clientY };
+      }
+    };
+    this._flyOnMouseUp = () => { that._flyDragging = false; };
+    this._flyOnMouseMove = (e) => {
+      if (!that._flyDragging) return;
+      let dx = e.clientX - that._flyLastMouse.x;
+      let dy = e.clientY - that._flyLastMouse.y;
+      that._flyLastMouse = { x: e.clientX, y: e.clientY };
+      let sensitivity = 0.003;
+      // Horizontal mouse → yaw (rotate around Z in Z-up world)
+      that._flyYaw -= dx * sensitivity;
+      // Vertical mouse → pitch (mouse down = look down, standard FPS)
+      that._flyPitch -= dy * sensitivity;
+      // Clamp pitch to avoid flipping
+      that._flyPitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, that._flyPitch));
+      that._applyFlyCamera();
+    };
+    this._flyOnContextMenu = (e) => { e.preventDefault(); };
+
+    let el = this.renderer.domElement;
+    el.setAttribute('tabindex', '0');
+    el.focus();
+    document.addEventListener('keydown', this._flyOnKeyDown);
+    document.addEventListener('keyup', this._flyOnKeyUp);
+    el.addEventListener('mousedown', this._flyOnMouseDown);
+    document.addEventListener('mouseup', this._flyOnMouseUp);
+    document.addEventListener('mousemove', this._flyOnMouseMove);
+    el.addEventListener('contextmenu', this._flyOnContextMenu);
+
+    // Fly hint overlay
+    if (!this._flyHint) {
+      this._flyHint = $('<div></div>').css({
+        "position": "absolute", "bottom": "6px", "left": "50%",
+        "transform": "translateX(-50%)", "font-size": "8px",
+        "font-family": "'JetBrains Mono', monospace",
+        "color": "rgba(200,200,220,0.5)", "white-space": "nowrap",
+        "pointer-events": "none",
+      }).text("WASD move  QE up/down  Shift fast  drag look").appendTo(this.wrapper2);
+    }
+    this._flyHint.css("display", "");
+  }
+
+  /** Apply yaw/pitch to camera via lookAt (Z-up world). */
+  _applyFlyCamera() {
+    let dir = new THREE.Vector3(
+      Math.cos(this._flyPitch) * Math.cos(this._flyYaw),
+      Math.cos(this._flyPitch) * Math.sin(this._flyYaw),
+      Math.sin(this._flyPitch)
+    );
+    let target = this.camera.position.clone().add(dir);
+    this.camera.up.set(0, 0, 1);
+    this.camera.lookAt(target);
+  }
+
+  _cleanupFlyMode() {
+    if (this._flyOnKeyDown) {
+      document.removeEventListener('keydown', this._flyOnKeyDown);
+      document.removeEventListener('keyup', this._flyOnKeyUp);
+      let el = this.renderer.domElement;
+      el.removeEventListener('mousedown', this._flyOnMouseDown);
+      document.removeEventListener('mouseup', this._flyOnMouseUp);
+      document.removeEventListener('mousemove', this._flyOnMouseMove);
+      el.removeEventListener('contextmenu', this._flyOnContextMenu);
+    }
+    this._flyKeys = {};
+    this._flyOnKeyDown = null;
+    if (this._flyHint) this._flyHint.css("display", "none");
+  }
+
+  _updateFlyMovement(delta) {
+    if (this.cameraMode !== 'fly' || !this._flyKeys) return;
+    let speed = this._flySpeed * delta;
+    if (this._flyKeys['ShiftLeft'] || this._flyKeys['ShiftRight']) speed *= 3;
+
+    // Forward direction on the horizontal XY plane (Z-up, yaw only)
+    let fwdX = Math.cos(this._flyYaw);
+    let fwdY = Math.sin(this._flyYaw);
+    // Right = perpendicular in XY plane
+    let rightX = Math.sin(this._flyYaw);
+    let rightY = -Math.cos(this._flyYaw);
+
+    let moved = false;
+    if (this._flyKeys['KeyW']) { this.camera.position.x += fwdX * speed; this.camera.position.y += fwdY * speed; moved = true; }
+    if (this._flyKeys['KeyS']) { this.camera.position.x -= fwdX * speed; this.camera.position.y -= fwdY * speed; moved = true; }
+    if (this._flyKeys['KeyD']) { this.camera.position.x += rightX * speed; this.camera.position.y += rightY * speed; moved = true; }
+    if (this._flyKeys['KeyA']) { this.camera.position.x -= rightX * speed; this.camera.position.y -= rightY * speed; moved = true; }
+    if (this._flyKeys['KeyQ'] || this._flyKeys['Space']) { this.camera.position.z += speed; moved = true; }
+    if (this._flyKeys['KeyE']) { this.camera.position.z -= speed; moved = true; }
+
+    if (moved) this._applyFlyCamera();
   }
 
   // ── ArUco Topic Discovery ──────────────────────────────────
@@ -555,6 +718,7 @@ class TFViewer extends Viewer {
     if (this.arucoPlugin) this.arucoPlugin.destroy();
 
     // Three.js cleanup
+    this._cleanupFlyMode();
     if (this._animFrameId) cancelAnimationFrame(this._animFrameId);
     if (this._resizeObserver) this._resizeObserver.disconnect();
     this._clearFrameObjects();

@@ -247,21 +247,16 @@ class ArucoMarkerPlugin {
     if (!this._labelElements[key]) {
       this._labelElements[key] = $('<div></div>').css({
         "position": "absolute",
-        "font-size": "11px",
-        "font-weight": "bold",
+        "font-size": "8px",
         "font-family": "'JetBrains Mono', monospace",
-        "color": "#44ff88",
-        "text-shadow": "0 0 3px #000, 0 0 6px #000",
+        "color": "rgba(180,190,200,0.6)",
+        "text-shadow": "0 0 2px rgba(0,0,0,0.8)",
         "white-space": "nowrap",
         "pointer-events": "none",
-        "transform": "translate(-50%, -100%)",
-        "padding": "2px 6px",
-        "background": "rgba(0,0,0,0.45)",
-        "border": "1px solid rgba(68,255,136,0.3)",
-        "border-radius": "3px",
+        "transform": "translate(4px, -50%)",
       }).appendTo(this.labelsOverlay);
     }
-    this._labelElements[key].text("ArUco #" + id).css({
+    this._labelElements[key].text("id:" + id).css({
       "display": "",
       "left": screenPos.x + "%",
       "top": screenPos.y + "%",
