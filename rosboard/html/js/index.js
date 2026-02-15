@@ -4,6 +4,10 @@ importJsOnce("js/viewers/meta/Viewer.js");
 importJsOnce("js/viewers/meta/Space2DViewer.js");
 importJsOnce("js/viewers/meta/Space3DViewer.js");
 
+// TFViewer plugins (must load before TFViewer)
+importJsOnce("js/viewers/plugins/RobotModelPlugin.js");
+importJsOnce("js/viewers/plugins/ArucoMarkerPlugin.js");
+
 importJsOnce("js/viewers/TFViewer.js");
 importJsOnce("js/viewers/ImageViewer.js");
 importJsOnce("js/viewers/LogViewer.js");
@@ -114,12 +118,14 @@ let onSystem = function(system) {
 }
 
 let onMsg = function(msg) {
-  if(!subscriptions[msg._topic_name]) {
-    console.log("Received unsolicited message", msg);
-  } else if(!subscriptions[msg._topic_name].viewer) {
-    console.log("Received msg but no viewer", msg);
-  } else {
+  if(subscriptions[msg._topic_name] && subscriptions[msg._topic_name].viewer) {
     subscriptions[msg._topic_name].viewer.update(msg);
+  } else if(Viewer._secondaryHandlers[msg._topic_name]) {
+    Viewer._secondaryHandlers[msg._topic_name](msg);
+  } else if(!subscriptions[msg._topic_name]) {
+    console.log("Received unsolicited message", msg);
+  } else {
+    console.log("Received msg but no viewer", msg);
   }
 }
 
@@ -239,9 +245,13 @@ function initDefaultTransport() {
     path: "/rosboard/v1",
     onOpen: onOpen,
     onMsg: onMsg,
-    onTopics: onTopics,
+    onTopics: function(topics) {
+      onTopics(topics);
+      Viewer._topics = currentTopics; // expose to plugins
+    },
     onSystem: onSystem,
   });
+  Viewer._transport = currentTransport;
   currentTransport.connect();
 }
 

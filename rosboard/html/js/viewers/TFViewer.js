@@ -1,11 +1,11 @@
 "use strict";
 
-// TF Viewer v4.0 — Three.js
-// 3D visualization of tf2_msgs/msg/TFMessage.
-// Robot FBX model attached to base_link, frame axes, links, labels.
+// TF Viewer v5.0 — Three.js + Plugin Architecture
+// Orchestrates: TF frames, RobotModelPlugin, ArucoMarkerPlugin.
 
 class TFViewer extends Viewer {
   onCreate() {
+    // TF state
     this.allTransforms = {};
     this.allFrameIds = new Set();
     this.allChildFrameIds = new Set();
@@ -16,14 +16,17 @@ class TFViewer extends Viewer {
     this.showLinks = true;
     this._lastTree = null;
 
+    // Three.js object pools
     this._frameAxes = {};
     this._frameLinks = {};
-    this.robotModel = null;
-    this.robotModelGroup = null;
+
+    // Secondary ArUco topic names we subscribed to
+    this._arucoTopicNames = [];
 
     this._createControls();
     this._initThreeJS();
 
+    // Labels overlay (shared by TF labels and plugins)
     this.labelsOverlay = $('<div></div>').css({
       "position": "absolute",
       "top": "0", "left": "0",
@@ -33,7 +36,19 @@ class TFViewer extends Viewer {
     }).appendTo(this.wrapper2);
     this.labelElements = {};
 
-    this._loadRobotModel();
+    // ── Plugins ──────────────────────────────────────────────
+    this.robotPlugin = new RobotModelPlugin(this.scene, {
+      modelUrl: '/models/obrik-sim2.fbx',
+      targetSize: 0.35,
+    });
+
+    this.arucoPlugin = new ArucoMarkerPlugin(this.scene, this.labelsOverlay, this.camera);
+
+    // Auto-discover ArUco topics after a short delay (topics arrive async)
+    let that = this;
+    this._arucoDiscoveryInterval = setInterval(() => {
+      that._discoverArucoTopics();
+    }, 2000);
   }
 
   // ── UI Controls ────────────────────────────────────────────
@@ -69,9 +84,13 @@ class TFViewer extends Viewer {
     this.showModelCheckbox = $('<input type="checkbox" checked>').appendTo(modelLabel);
     $('<span></span>').addClass("monospace").css({"opacity": 0.6}).text("model").appendTo(modelLabel);
 
+    let arucoLabel = $('<label></label>').css({"display": "flex", "gap": "3px", "align-items": "center", "cursor": "pointer"}).appendTo(this.controlsBar);
+    this.showArucoCheckbox = $('<input type="checkbox" checked>').appendTo(arucoLabel);
+    $('<span></span>').addClass("monospace").css({"opacity": 0.6}).text("aruco").appendTo(arucoLabel);
+
     this.frameCountLabel = $('<span></span>').addClass("monospace").css({"opacity": 0.4, "margin-left": "auto"}).appendTo(this.controlsBar);
 
-    // collapsible child frames
+    // Collapsible child frames
     this.childToggle = $('<div></div>').css({
       "display": "flex", "align-items": "center", "gap": "4px",
       "cursor": "pointer", "padding": "2px 0", "font-size": "10px", "user-select": "none",
@@ -94,6 +113,7 @@ class TFViewer extends Viewer {
       this.childToggleArrow.css("transform", childPanelVisible ? "rotate(90deg)" : "none");
     });
 
+    // Event handlers
     let that = this;
     this.frameIdSelect.on("change", function() {
       that.selectedFrameId = $(this).val() || null;
@@ -115,9 +135,10 @@ class TFViewer extends Viewer {
       that._updateLabels();
     });
     this.showModelCheckbox.on("change", function() {
-      if (that.robotModelGroup) {
-        that.robotModelGroup.visible = !!$(this).is(":checked");
-      }
+      if (that.robotPlugin) that.robotPlugin.setVisible(!!$(this).is(":checked"));
+    });
+    this.showArucoCheckbox.on("change", function() {
+      if (that.arucoPlugin) that.arucoPlugin.setVisible(!!$(this).is(":checked"));
     });
   }
 
@@ -163,7 +184,7 @@ class TFViewer extends Viewer {
     this.orbitControls.maxDistance = 100;
     this.orbitControls.update();
 
-    // Lighting (balanced for original FBX materials)
+    // Lighting
     this.scene.add(new THREE.AmbientLight(0xcccccc, 0.7));
     let dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
     dirLight.position.set(5, -3, 10);
@@ -176,9 +197,7 @@ class TFViewer extends Viewer {
     this.scene.add(backLight);
 
     this._createGrid();
-
-    let originAxes = new THREE.AxesHelper(0.5);
-    this.scene.add(originAxes);
+    this.scene.add(new THREE.AxesHelper(0.5));
 
     this.framesGroup = new THREE.Group();
     this.linksGroup = new THREE.Group();
@@ -196,6 +215,7 @@ class TFViewer extends Viewer {
       if (now - lastLabelTime > 50) {
         lastLabelTime = now;
         that._updateLabels();
+        if (that.arucoPlugin) that.arucoPlugin.updateLabels();
       }
     };
     animate();
@@ -216,106 +236,54 @@ class TFViewer extends Viewer {
   }
 
   _createGrid() {
-    let gridSize = 10;
-    let gridDivisions = 10;
-    let gridVerts = [];
-    let half = gridSize / 2;
-    let step = gridSize / gridDivisions;
-
+    let gridSize = 10, gridDivisions = 10;
+    let verts = [], half = gridSize / 2, step = gridSize / gridDivisions;
     for (let i = 0; i <= gridDivisions; i++) {
       let pos = -half + i * step;
-      gridVerts.push(pos, -half, 0, pos, half, 0);
-      gridVerts.push(-half, pos, 0, half, pos, 0);
+      verts.push(pos, -half, 0, pos, half, 0);
+      verts.push(-half, pos, 0, half, pos, 0);
     }
-
     let geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(gridVerts, 3));
-    let mat = new THREE.LineBasicMaterial({ color: 0x334466, transparent: true, opacity: 0.3 });
-    this.scene.add(new THREE.LineSegments(geo, mat));
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+    this.scene.add(new THREE.LineSegments(geo,
+      new THREE.LineBasicMaterial({ color: 0x334466, transparent: true, opacity: 0.3 })));
   }
 
-  // ── Robot Model ────────────────────────────────────────────
+  // ── ArUco Topic Discovery ──────────────────────────────────
 
-  _loadRobotModel() {
-    let that = this;
+  _discoverArucoTopics() {
+    let topics = Viewer._topics;
+    if (!topics) return;
 
-    // Group that follows base_link (model or fallback marker)
-    this.robotModelGroup = new THREE.Group();
-    this.scene.add(this.robotModelGroup);
+    let arucoTypes = [
+      'aruco_det_loc/msg/MarkerArray',
+      'visualization_msgs/msg/MarkerArray',
+      'visualization_msgs/MarkerArray',
+    ];
 
-    // Fallback marker: bright sphere visible immediately at base_link
-    let markerGeo = new THREE.SphereGeometry(0.08, 16, 12);
-    let markerMat = new THREE.MeshPhongMaterial({
-      color: 0x00ffaa, emissive: 0x006644, transparent: true, opacity: 0.6,
-    });
-    this._fallbackMarker = new THREE.Mesh(markerGeo, markerMat);
-    this.robotModelGroup.add(this._fallbackMarker);
-
-    // Try loading FBX model
-    if (typeof THREE === 'undefined' || typeof THREE.FBXLoader === 'undefined') {
-      console.warn('[TFViewer] THREE.FBXLoader not available, using fallback marker');
-      return;
+    for (let topicName in topics) {
+      let topicType = topics[topicName];
+      if (arucoTypes.includes(topicType) && !this._arucoTopicNames.includes(topicName)) {
+        this._arucoTopicNames.push(topicName);
+        let that = this;
+        Viewer.subscribeSecondary(topicName, (msg) => {
+          that._onArucoData(msg);
+        });
+        console.log('[TFViewer] Auto-subscribed to ArUco topic:', topicName);
+      }
     }
 
-    let loader = new THREE.FBXLoader();
-    loader.load('/models/obrik-sim2.fbx', (object) => {
-      // FBXLoader converts to Three.js Y-up. Our scene is Z-up (ROS).
-      // Correction: rotate +90° around X to convert Y-up → Z-up.
-      let correction = new THREE.Group();
-      correction.rotation.x = Math.PI / 2;
-      correction.add(object);
+    // Stop polling once we found topics (or after topics are available)
+    if (Object.keys(topics).length > 0) {
+      clearInterval(this._arucoDiscoveryInterval);
+      this._arucoDiscoveryInterval = null;
+    }
+  }
 
-      // Measure bounding box with correction applied
-      correction.updateMatrixWorld(true);
-      let box = new THREE.Box3().setFromObject(correction);
-      let size = new THREE.Vector3();
-      box.getSize(size);
-      let maxDim = Math.max(size.x, size.y, size.z);
-      let targetSize = 0.35;
-      let s = maxDim > 0 ? targetSize / maxDim : 1.0;
-
-      // Pivot: scale + center
-      let pivot = new THREE.Group();
-      pivot.add(correction);
-      pivot.scale.set(s, s, s);
-
-      // Center on bounding box
-      pivot.updateMatrixWorld(true);
-      box.setFromObject(pivot);
-      let center = new THREE.Vector3();
-      box.getCenter(center);
-      // Shift inside correction to keep pivot at center
-      correction.position.set(-center.x / s, -center.y / s, -center.z / s);
-
-      // Keep original FBX materials
-      object.traverse((child) => {
-        if (child.isMesh && child.material) {
-          let mats = Array.isArray(child.material) ? child.material : [child.material];
-          mats.forEach((m) => { m.side = THREE.DoubleSide; });
-        }
-      });
-
-      // Remove fallback marker, add real model
-      that.robotModelGroup.remove(that._fallbackMarker);
-      that._fallbackMarker.geometry.dispose();
-      that._fallbackMarker.material.dispose();
-      that._fallbackMarker = null;
-
-      that.robotModel = object;
-      that._modelPivot = pivot;
-      that._modelCorrection = correction;
-      that.robotModelGroup.add(pivot);
-      that.robotModelGroup.visible = that.showModelCheckbox.is(":checked");
-
-      console.log('[TFViewer] Model loaded. bbox:', size.x.toFixed(1), 'x',
-        size.y.toFixed(1), 'x', size.z.toFixed(1), ', scale:', s.toFixed(6));
-    }, (xhr) => {
-      if (xhr.total) {
-        console.log('[TFViewer] Loading model:', Math.round(xhr.loaded / xhr.total * 100) + '%');
-      }
-    }, (error) => {
-      console.warn('[TFViewer] FBX load failed, keeping fallback marker.', error.message || error);
-    });
+  _onArucoData(msg) {
+    if (!this.arucoPlugin) return;
+    let markers = msg.markers || [];
+    this.arucoPlugin.updateMarkers(markers);
   }
 
   // ── TF Data Management ────────────────────────────────────
@@ -341,11 +309,9 @@ class TFViewer extends Viewer {
       this.selectedFrameId = null;
       return;
     }
-
     frameIds.forEach((fid) => {
       $('<option></option>').attr("value", fid).text(fid).appendTo(this.frameIdSelect);
     });
-
     if (currentValue && frameIds.includes(currentValue)) {
       this.frameIdSelect.val(currentValue);
       this.selectedFrameId = currentValue;
@@ -359,18 +325,15 @@ class TFViewer extends Viewer {
     let childFrames = Array.from(this.allChildFrameIds).sort();
     this.childFramesList.empty();
     if (childFrames.length === 0) return;
-
     if (this.visibleChildFrames.size === 0) {
       childFrames.forEach((cfid) => this.visibleChildFrames.add(cfid));
     }
-
     let that = this;
     childFrames.forEach((cfid) => {
       let row = $('<label></label>').css({
         "display": "flex", "gap": "3px", "align-items": "center",
         "cursor": "pointer", "break-inside": "avoid", "line-height": "1.6",
       }).appendTo(this.childFramesList);
-
       let checkbox = $('<input type="checkbox">')
         .prop("checked", this.visibleChildFrames.has(cfid)).appendTo(row);
       checkbox.on("change", function() {
@@ -378,10 +341,8 @@ class TFViewer extends Viewer {
         else that.visibleChildFrames.delete(cfid);
         that._updateDisplay();
       });
-
       $('<span></span>').addClass("monospace").css({"opacity": 0.8}).text(cfid).appendTo(row);
     });
-
     this.frameCountLabel.text(childFrames.length + " frames");
   }
 
@@ -390,43 +351,30 @@ class TFViewer extends Viewer {
   _buildTransformTree(rootFrameId) {
     let tree = {};
     let visited = new Set();
-
     let buildTree = (frameId, parentPos, parentQuat) => {
       if (visited.has(frameId)) return;
       visited.add(frameId);
-
       for (let key in this.allTransforms) {
         let tf = this.allTransforms[key];
         if (tf?.header?.frame_id !== frameId) continue;
-
         let childId = tf?.child_frame_id;
         if (!childId) continue;
-
         let tr = tf?.transform?.translation;
         let rot = tf?.transform?.rotation;
         if (!tr || !rot) continue;
-
         let localPos = new THREE.Vector3(tr.x || 0, tr.y || 0, tr.z || 0);
         let localQuat = new THREE.Quaternion(
-          rot.x || 0, rot.y || 0, rot.z || 0,
-          rot.w == null ? 1 : rot.w
+          rot.x || 0, rot.y || 0, rot.z || 0, rot.w == null ? 1 : rot.w
         ).normalize();
-
         let childPos = localPos.clone().applyQuaternion(parentQuat).add(parentPos);
         let childQuat = parentQuat.clone().multiply(localQuat);
-
         tree[childId] = {
-          transform: tf,
-          position: childPos,
-          quaternion: childQuat,
-          parentFrameId: frameId,
-          parentPosition: parentPos.clone(),
+          transform: tf, position: childPos, quaternion: childQuat,
+          parentFrameId: frameId, parentPosition: parentPos.clone(),
         };
-
         buildTree(childId, childPos, childQuat);
       }
     };
-
     buildTree(rootFrameId, new THREE.Vector3(), new THREE.Quaternion());
     return tree;
   }
@@ -439,7 +387,6 @@ class TFViewer extends Viewer {
       this._frameAxes[id].dispose();
     }
     this._frameAxes = {};
-
     for (let id in this._frameLinks) {
       this.linksGroup.remove(this._frameLinks[id]);
       this._frameLinks[id].geometry.dispose();
@@ -450,22 +397,19 @@ class TFViewer extends Viewer {
 
   _updateDisplay() {
     if (!this.selectedFrameId) return;
-
     let scale = this.axisScale;
     if (!Number.isFinite(scale) || scale <= 0) scale = 0.3;
 
     let tree = this._buildTransformTree(this.selectedFrameId);
     this._lastTree = tree;
-
     let activeChildIds = new Set();
 
     for (let childId in tree) {
       if (!this.visibleChildFrames.has(childId)) continue;
       activeChildIds.add(childId);
-
       let fd = tree[childId];
 
-      // Frame axes (create once, reuse)
+      // Frame axes
       if (!this._frameAxes[childId]) {
         let axes = new THREE.AxesHelper(1.0);
         this.framesGroup.add(axes);
@@ -477,17 +421,14 @@ class TFViewer extends Viewer {
       axes.scale.setScalar(scale);
       axes.visible = true;
 
-      // Link line
+      // Link lines
       if (this.showLinks && fd.parentPosition) {
         if (!this._frameLinks[childId]) {
-          let mat = new THREE.LineBasicMaterial({
-            color: 0x667788, transparent: true, opacity: 0.35,
-          });
+          let mat = new THREE.LineBasicMaterial({ color: 0x667788, transparent: true, opacity: 0.35 });
           let geo = new THREE.BufferGeometry();
           geo.setAttribute('position', new THREE.Float32BufferAttribute([0,0,0, 0,0,0], 3));
-          let line = new THREE.Line(geo, mat);
-          this.linksGroup.add(line);
-          this._frameLinks[childId] = line;
+          this.linksGroup.add(new THREE.Line(geo, mat));
+          this._frameLinks[childId] = this.linksGroup.children[this.linksGroup.children.length - 1];
         }
         let posAttr = this._frameLinks[childId].geometry.attributes.position;
         posAttr.setXYZ(0, fd.parentPosition.x, fd.parentPosition.y, fd.parentPosition.z);
@@ -499,13 +440,12 @@ class TFViewer extends Viewer {
       }
 
       // Robot model follows base_link
-      if (childId === 'base_link' && this.robotModelGroup) {
-        this.robotModelGroup.position.copy(fd.position);
-        this.robotModelGroup.quaternion.copy(fd.quaternion);
+      if (childId === 'base_link' && this.robotPlugin) {
+        this.robotPlugin.setTransform(fd.position, fd.quaternion);
       }
     }
 
-    // Hide inactive objects
+    // Hide inactive
     for (let id in this._frameAxes) {
       if (!activeChildIds.has(id)) this._frameAxes[id].visible = false;
     }
@@ -516,40 +456,36 @@ class TFViewer extends Viewer {
     this._updateLabels();
   }
 
-  // ── Labels (HTML overlay) ──────────────────────────────────
+  // ── Labels (HTML overlay for TF frames) ────────────────────
 
   _project3DTo2D(pos) {
     let v = pos instanceof THREE.Vector3 ? pos.clone() : new THREE.Vector3(pos[0], pos[1], pos[2]);
     v.project(this.camera);
     if (Math.abs(v.x) > 2 || Math.abs(v.y) > 2 || v.z > 1) return null;
-    return {
-      x: (v.x * 0.5 + 0.5) * 100,
-      y: (-v.y * 0.5 + 0.5) * 100,
-    };
+    return { x: (v.x * 0.5 + 0.5) * 100, y: (-v.y * 0.5 + 0.5) * 100 };
   }
 
   _updateLabels() {
     if (!this.labelsOverlay) return;
     if (!this.showLabels || !this._lastTree) {
-      this.labelsOverlay.css("display", "none");
+      // Only hide TF labels, not aruco labels
+      for (let name in this.labelElements) {
+        this.labelElements[name].css("display", "none");
+      }
       return;
     }
-    this.labelsOverlay.css("display", "");
 
     let usedLabels = new Set();
-
     let rootName = this.selectedFrameId;
     if (rootName) {
       usedLabels.add(rootName);
       this._setLabel(rootName, this._project3DTo2D(new THREE.Vector3(0, 0, 0)), "#fff");
     }
-
     for (let childId in this._lastTree) {
       if (!this.visibleChildFrames.has(childId)) continue;
       usedLabels.add(childId);
       this._setLabel(childId, this._project3DTo2D(this._lastTree[childId].position), "#ccc");
     }
-
     for (let name in this.labelElements) {
       if (!usedLabels.has(name)) {
         this.labelElements[name].remove();
@@ -577,9 +513,7 @@ class TFViewer extends Viewer {
       }).appendTo(this.labelsOverlay);
     }
     this.labelElements[name].text(name).css({
-      "display": "",
-      "left": screenPos.x + "%",
-      "top": screenPos.y + "%",
+      "display": "", "left": screenPos.x + "%", "top": screenPos.y + "%",
     });
   }
 
@@ -594,11 +528,9 @@ class TFViewer extends Viewer {
 
     let hasNewFrames = false;
     let prevCount = this.allChildFrameIds.size;
-
     for (let i = 0; i < transforms.length; i++) {
       if (this._storeTransform(transforms[i])) hasNewFrames = true;
     }
-
     if (hasNewFrames) {
       this._updateFrameIdOptions();
       if (this.allChildFrameIds.size > prevCount) {
@@ -606,13 +538,23 @@ class TFViewer extends Viewer {
       }
       this._updateChildFramesList();
     }
-
     this._updateDisplay();
   }
 
   // ── Cleanup ────────────────────────────────────────────────
 
   destroy() {
+    // Unsubscribe secondary topics
+    for (let i = 0; i < this._arucoTopicNames.length; i++) {
+      Viewer.unsubscribeSecondary(this._arucoTopicNames[i]);
+    }
+    if (this._arucoDiscoveryInterval) clearInterval(this._arucoDiscoveryInterval);
+
+    // Destroy plugins
+    if (this.robotPlugin) this.robotPlugin.destroy();
+    if (this.arucoPlugin) this.arucoPlugin.destroy();
+
+    // Three.js cleanup
     if (this._animFrameId) cancelAnimationFrame(this._animFrameId);
     if (this._resizeObserver) this._resizeObserver.disconnect();
     this._clearFrameObjects();

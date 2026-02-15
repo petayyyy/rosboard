@@ -225,6 +225,25 @@ Viewer.maxUpdateRate = 50.0;
 // stores registered viewers in sequence of loading
 Viewer._viewers = [];
 
+// Secondary subscription handlers: allows a viewer to receive data from additional topics.
+// Map of topicName -> callback(msg).
+Viewer._secondaryHandlers = {};
+Viewer._transport = null; // set by index.js after transport init
+
+Viewer.subscribeSecondary = (topicName, callback) => {
+  Viewer._secondaryHandlers[topicName] = callback;
+  if (Viewer._transport) {
+    Viewer._transport.subscribe({ topicName: topicName });
+  }
+};
+
+Viewer.unsubscribeSecondary = (topicName) => {
+  delete Viewer._secondaryHandlers[topicName];
+  if (Viewer._transport) {
+    Viewer._transport.unsubscribe({ topicName: topicName });
+  }
+};
+
 // override this
 Viewer.onClose = (viewerInstance) => { console.log("not implemented; override necessary"); }
 Viewer.onSwitchViewer = (viewerInstance, newViewerType) => { console.log("not implemented; override necessary"); }
