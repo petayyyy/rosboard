@@ -27,7 +27,9 @@ setup(
             'html/js/*',
             'html/js/viewers/*',
             'html/js/viewers/meta/*',
-            'html/js/transports/*'
+            'html/js/viewers/plugins/*',
+            'html/js/transports/*',
+            'html/models/*',
         ]
     },
     #zip_safe=True,
