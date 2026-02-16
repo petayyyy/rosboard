@@ -43,9 +43,13 @@
           </header>
           <div class="mdl-layout__drawer">
             <nav id="topics-nav" class="mdl-navigation">
-                <div id="topics-nav-system-title" class="topics-nav-title">System</div>
+                <div id="topics-nav-system-title" class="topics-nav-title topics-nav-collapsible" data-target="topics-nav-system">
+                  <span class="topics-nav-arrow">&#9660;</span> System
+                </div>
                 <div id="topics-nav-system"></div>
-                <div id="topics-nav-ros-title" class="topics-nav-title">ROS topics</div>
+                <div id="topics-nav-ros-title" class="topics-nav-title topics-nav-collapsible" data-target="topics-nav-ros">
+                  <span class="topics-nav-arrow">&#9660;</span> ROS topics
+                </div>
                 <div id="topics-nav-ros"></div>
                 <div style="opacity:0.3;" id="topics-nav-unsupported"></div>
             </nav>

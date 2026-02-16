@@ -332,6 +332,25 @@ input, textarea, *[contenteditable=true] {
   padding-bottom:10pt;
 }
 
+.topics-nav-collapsible {
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s;
+}
+.topics-nav-collapsible:hover {
+  color: #b0b0b0;
+}
+.topics-nav-arrow {
+  display: inline-block;
+  font-size: 8px;
+  transition: transform 0.15s;
+  width: 12px;
+  text-align: center;
+}
+.topics-nav-collapsed .topics-nav-arrow {
+  transform: rotate(-90deg);
+}
+
 /* width */
 ::-webkit-scrollbar {
   width: 10px;

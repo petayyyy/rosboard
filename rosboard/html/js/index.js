@@ -180,34 +180,65 @@ function addTopicTreeToNav(topicTree, el, level = 0, path = "") {
     .css(level < 1 ? {} : {
       "padding-left": "0pt",
       "margin-left": "12pt",
-      "border-left": "1px dashed #808080",
+      "border-left": "1px dashed rgba(128,128,128,0.3)",
     })
     .appendTo(el);
     let fullTopicName = path + "/" + subTree.name;
     let topicType = currentTopics[fullTopicName];
+    let hasChildren = subTree.children && subTree.children.length > 0;
+
     if(topicType) {
+      // Leaf topic — clickable to subscribe
       $('<a></a>')
-        .addClass("mdl-navigation__link")
-        .css({
-          "padding-left": "12pt",
-          "margin-left": 0,
-        })
+        .addClass("mdl-navigation__link topic-leaf")
+        .css({"padding-left": "12pt", "margin-left": 0})
         .click(() => { initSubscribe({topicName: fullTopicName, topicType: topicType}); })
         .text(subTree.name)
         .appendTo(subEl);
-    } else {
+    } else if(hasChildren) {
+      // Group node — collapsible
+      let childContainer = null;
+      let expanded = level < 1; // top-level expanded by default, deeper collapsed
+      let arrow = $('<span></span>').css({
+        "display": "inline-block", "width": "12px", "font-size": "8px",
+        "transition": "transform 0.15s", "text-align": "center",
+        "transform": expanded ? "rotate(90deg)" : "none",
+      }).text("\u25B6");
+
       $('<a></a>')
-      .addClass("mdl-navigation__link")
-      .attr("disabled", "disabled")
-      .css({
-        "padding-left": "12pt",
-        "margin-left": 0,
-        opacity: 0.5,
-      })
-      .text(subTree.name)
-      .appendTo(subEl);
+        .addClass("mdl-navigation__link topic-group")
+        .css({
+          "padding-left": "8pt", "margin-left": 0,
+          "cursor": "pointer", "user-select": "none", "opacity": 0.7,
+        })
+        .append(arrow)
+        .append($('<span></span>').text(" " + subTree.name).css({"font-weight": "600"}))
+        .click(function() {
+          expanded = !expanded;
+          arrow.css("transform", expanded ? "rotate(90deg)" : "none");
+          childContainer.css("display", expanded ? "" : "none");
+        })
+        .appendTo(subEl);
+
+      childContainer = $('<div></div>').css({
+        "display": expanded ? "" : "none",
+      }).appendTo(subEl);
+
+      addTopicTreeToNav(subTree, childContainer, level + 1, fullTopicName);
+      return; // children already added into childContainer
+    } else {
+      // Namespace without children or topic — show as disabled
+      $('<a></a>')
+        .addClass("mdl-navigation__link")
+        .attr("disabled", "disabled")
+        .css({"padding-left": "12pt", "margin-left": 0, opacity: 0.35})
+        .text(subTree.name)
+        .appendTo(subEl);
     }
-    addTopicTreeToNav(subTree, subEl, level + 1, path + "/" + subTree.name);
+
+    if(hasChildren) {
+      addTopicTreeToNav(subTree, subEl, level + 1, fullTopicName);
+    }
   });
 }
 
@@ -297,6 +328,23 @@ $(() => {
   if(window.location.href.indexOf("rosboard.com") === -1) {
     initDefaultTransport();
   }
+
+  // Collapsible section headers (System, ROS topics)
+  $(".topics-nav-collapsible").each(function() {
+    let header = $(this);
+    let targetId = header.data("target");
+    let target = $("#" + targetId);
+    header.on("click", function() {
+      let isCollapsed = header.hasClass("topics-nav-collapsed");
+      if (isCollapsed) {
+        header.removeClass("topics-nav-collapsed");
+        target.slideDown(150);
+      } else {
+        header.addClass("topics-nav-collapsed");
+        target.slideUp(150);
+      }
+    });
+  });
 });
 
 Viewer.onClose = function(viewerInstance) {
