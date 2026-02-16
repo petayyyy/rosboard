@@ -126,10 +126,26 @@ class RobotModelPlugin {
 
   // ── Public API ─────────────────────────────────────────────
 
-  /** Update position and rotation (called each TF update for the attached frame). */
+  /** Update target position and rotation (called each TF update for the attached frame). */
   setTransform(position, quaternion) {
-    if (position) this.group.position.copy(position);
-    if (quaternion) this.group.quaternion.copy(quaternion);
+    if (position) {
+      this._targetPosition = position.clone ? position.clone() : new THREE.Vector3().copy(position);
+    }
+    if (quaternion) {
+      this._targetQuaternion = quaternion.clone ? quaternion.clone() : new THREE.Quaternion().copy(quaternion);
+      this._targetQuaternion.normalize();
+    }
+  }
+
+  /** Call every frame from the render loop to smoothly interpolate towards target. */
+  updateSmooth(dt) {
+    if (!this._targetPosition) return;
+    // Smooth factor: higher = faster catch-up. ~10*dt at 30fps ≈ 0.33 per frame.
+    let t = Math.min(1.0, 10.0 * dt);
+    this.group.position.lerp(this._targetPosition, t);
+    if (this._targetQuaternion) {
+      this.group.quaternion.slerp(this._targetQuaternion, t);
+    }
   }
 
   /** Show or hide the model. */
