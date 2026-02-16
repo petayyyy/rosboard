@@ -446,7 +446,14 @@ class TFViewer extends Viewer {
   _onArucoData(msg) {
     if (!this.arucoPlugin) return;
     let markers = msg.markers || [];
-    this.arucoPlugin.updateMarkers(markers);
+    if (markers.length === 0) return;
+
+    let frameId = msg.header?.frame_id || '';
+    let rootId = this.selectedFrameId || '';
+
+    // Transform markers from source frame into root TF frame
+    let transformed = TFUtils.transformMarkers(markers, frameId, rootId, this._lastTree);
+    this.arucoPlugin.updateMarkers(transformed);
   }
 
   // ── TF Data Management ────────────────────────────────────
