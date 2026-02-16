@@ -615,6 +615,11 @@ class TFViewer extends Viewer {
       }
     }
 
+    // Robot model always follows base_link, even if frame is hidden
+    if (!activeChildIds.has('base_link') && tree['base_link'] && this.robotPlugin) {
+      this.robotPlugin.setTransform(tree['base_link'].position, tree['base_link'].quaternion);
+    }
+
     // Hide inactive
     for (let id in this._frameAxes) {
       if (!activeChildIds.has(id)) this._frameAxes[id].visible = false;
