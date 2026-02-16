@@ -233,6 +233,7 @@ class TFViewer extends Viewer {
         that.orbitControls.update();
       }
       if (that.robotPlugin) that.robotPlugin.updateSmooth(delta);
+      if (that.arucoPlugin) that.arucoPlugin.updateSmooth(delta);
       that.renderer.render(that.scene, that.camera);
       if (now - lastLabelTime > 50) {
         lastLabelTime = now;

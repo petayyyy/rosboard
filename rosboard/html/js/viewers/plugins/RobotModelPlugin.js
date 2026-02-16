@@ -23,8 +23,8 @@ class RobotModelPlugin {
     this.onLoadCallback = options.onLoad || null;
     this.onErrorCallback = options.onError || null;
 
-    this.group = new THREE.Group();
-    this.scene.add(this.group);
+    this._smooth = new SmoothTransform(scene, { speed: 10 });
+    this.group = this._smooth.group;
 
     this._model = null;
     this._pivot = null;
@@ -128,24 +128,12 @@ class RobotModelPlugin {
 
   /** Update target position and rotation (called each TF update for the attached frame). */
   setTransform(position, quaternion) {
-    if (position) {
-      this._targetPosition = position.clone ? position.clone() : new THREE.Vector3().copy(position);
-    }
-    if (quaternion) {
-      this._targetQuaternion = quaternion.clone ? quaternion.clone() : new THREE.Quaternion().copy(quaternion);
-      this._targetQuaternion.normalize();
-    }
+    this._smooth.setTarget(position, quaternion);
   }
 
   /** Call every frame from the render loop to smoothly interpolate towards target. */
   updateSmooth(dt) {
-    if (!this._targetPosition) return;
-    // Smooth factor: higher = faster catch-up. ~10*dt at 30fps ≈ 0.33 per frame.
-    let t = Math.min(1.0, 10.0 * dt);
-    this.group.position.lerp(this._targetPosition, t);
-    if (this._targetQuaternion) {
-      this.group.quaternion.slerp(this._targetQuaternion, t);
-    }
+    this._smooth.update(dt);
   }
 
   /** Show or hide the model. */
@@ -164,7 +152,7 @@ class RobotModelPlugin {
     if (this._pivot) {
       this.group.remove(this._pivot);
     }
-    this.scene.remove(this.group);
+    this._smooth.destroy();
     // Note: Three.js geometry/material disposal for loaded FBX
     // is complex; the scene GC handles most of it.
   }

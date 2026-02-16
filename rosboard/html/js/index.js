@@ -5,6 +5,7 @@ importJsOnce("js/viewers/meta/Space2DViewer.js");
 importJsOnce("js/viewers/meta/Space3DViewer.js");
 
 // TFViewer plugins (must load before TFViewer)
+importJsOnce("js/viewers/plugins/SmoothTransform.js");
 importJsOnce("js/viewers/plugins/TFUtils.js");
 importJsOnce("js/viewers/plugins/RobotModelPlugin.js");
 importJsOnce("js/viewers/plugins/ArucoMarkerPlugin.js");

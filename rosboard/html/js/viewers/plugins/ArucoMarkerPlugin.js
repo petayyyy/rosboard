@@ -21,12 +21,12 @@ class ArucoMarkerPlugin {
     this.group = new THREE.Group();
     this.scene.add(this.group);
 
-    this._markerObjects = {};   // id → { group, mesh, border, axes, ... }
+    this._markerObjects = {};   // id → { smooth, mesh, border, axes, ... }
     this._textureCache = {};    // id → THREE.CanvasTexture
     this._labelElements = {};   // key → jQuery element
     this._lastMarkers = [];
     this._visible = true;
-    this._smoothFactor = 0.15;  // 0..1, lower = smoother, higher = more responsive
+    this._smoothSpeed = 8;      // SmoothTransform speed for markers
   }
 
   // ── ArUco Texture Generation ─────────────────────────────
@@ -118,7 +118,7 @@ class ArucoMarkerPlugin {
     if (this._markerObjects[id]) return this._markerObjects[id];
 
     let markerSize = size || 0.15;
-    let markerGroup = new THREE.Group();
+    let smooth = new SmoothTransform(this.group, { speed: this._smoothSpeed });
 
     // ArUco textured plane
     let texture = this._generateArucoTexture(id);
@@ -128,7 +128,7 @@ class ArucoMarkerPlugin {
       side: THREE.DoubleSide,
     });
     let mesh = new THREE.Mesh(geo, mat);
-    markerGroup.add(mesh);
+    smooth.group.add(mesh);
 
     // Green border outline
     let borderPoints = [
@@ -140,15 +140,13 @@ class ArucoMarkerPlugin {
     let borderGeo = new THREE.BufferGeometry().setFromPoints(borderPoints);
     let borderMat = new THREE.LineBasicMaterial({ color: 0x44ff88, linewidth: 2 });
     let border = new THREE.LineLoop(borderGeo, borderMat);
-    markerGroup.add(border);
+    smooth.group.add(border);
 
     // Mini axes at marker center (shows orientation)
     let axes = new THREE.AxesHelper(markerSize * 0.6);
-    markerGroup.add(axes);
+    smooth.group.add(axes);
 
-    this.group.add(markerGroup);
-
-    let obj = { group: markerGroup, mesh, border, axes, geo, mat, texture, size: markerSize };
+    let obj = { smooth, mesh, border, axes, geo, mat, texture, size: markerSize };
     this._markerObjects[id] = obj;
     return obj;
   }
@@ -171,30 +169,18 @@ class ArucoMarkerPlugin {
 
       let obj = this._getOrCreateMarker(m.id, m.size);
 
-      // Position and orient using pose (with smoothing to reduce camera detection jitter)
+      // Set target pose (SmoothTransform will interpolate in updateSmooth)
       if (m.pose) {
-        let p = m.pose.position;
-        let o = m.pose.orientation;
-        let t = this._smoothFactor;
-        if (p) {
-          let target = new THREE.Vector3(p.x || 0, p.y || 0, p.z || 0);
-          obj.group.position.lerp(target, t);
-        }
-        if (o) {
-          let target = new THREE.Quaternion(
-            o.x || 0, o.y || 0, o.z || 0, o.w == null ? 1 : o.w
-          ).normalize();
-          obj.group.quaternion.slerp(target, t);
-        }
+        obj.smooth.setTarget(m.pose.position, m.pose.orientation);
       }
 
-      obj.group.visible = this._visible;
+      obj.smooth.group.visible = this._visible;
     }
 
     // Hide markers that are no longer present
     for (let id in this._markerObjects) {
       if (!activeIds.has(Number(id)) && !activeIds.has(id)) {
-        this._markerObjects[id].group.visible = false;
+        this._markerObjects[id].smooth.group.visible = false;
       }
     }
   }
@@ -267,6 +253,15 @@ class ArucoMarkerPlugin {
     });
   }
 
+  // ── Smooth update (call every frame from render loop) ─────
+
+  /** Interpolate all markers towards targets. Call from render loop. */
+  updateSmooth(dt) {
+    for (let id in this._markerObjects) {
+      this._markerObjects[id].smooth.update(dt);
+    }
+  }
+
   // ── Public API ─────────────────────────────────────────────
 
   setVisible(visible) {
@@ -291,7 +286,7 @@ class ArucoMarkerPlugin {
         obj.border.material.dispose();
       }
       if (obj.axes) obj.axes.dispose();
-      this.group.remove(obj.group);
+      obj.smooth.destroy();
     }
     this._markerObjects = {};
 
