@@ -26,6 +26,7 @@ class ArucoMarkerPlugin {
     this._labelElements = {};   // key → jQuery element
     this._lastMarkers = [];
     this._visible = true;
+    this._smoothFactor = 0.15;  // 0..1, lower = smoother, higher = more responsive
   }
 
   // ── ArUco Texture Generation ─────────────────────────────
@@ -170,17 +171,20 @@ class ArucoMarkerPlugin {
 
       let obj = this._getOrCreateMarker(m.id, m.size);
 
-      // Position and orient using pose
+      // Position and orient using pose (with smoothing to reduce camera detection jitter)
       if (m.pose) {
         let p = m.pose.position;
         let o = m.pose.orientation;
+        let t = this._smoothFactor;
         if (p) {
-          obj.group.position.set(p.x || 0, p.y || 0, p.z || 0);
+          let target = new THREE.Vector3(p.x || 0, p.y || 0, p.z || 0);
+          obj.group.position.lerp(target, t);
         }
         if (o) {
-          obj.group.quaternion.set(
+          let target = new THREE.Quaternion(
             o.x || 0, o.y || 0, o.z || 0, o.w == null ? 1 : o.w
           ).normalize();
+          obj.group.quaternion.slerp(target, t);
         }
       }
 

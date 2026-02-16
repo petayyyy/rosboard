@@ -97,9 +97,20 @@ var TFUtils = {
       let m = markers[i];
       let tm = { id: m.id, size: m.size };
 
-      // Transform pose
+      // Transform pose (using pre-computed fp/fq, not re-looking up)
       if (m.pose) {
-        tm.pose = TFUtils.transformPose(m.pose, frameId, rootFrameId, tfTree);
+        let lp = m.pose.position || {};
+        let lo = m.pose.orientation || {};
+        let localPos = new THREE.Vector3(lp.x || 0, lp.y || 0, lp.z || 0);
+        let localQuat = new THREE.Quaternion(
+          lo.x || 0, lo.y || 0, lo.z || 0, lo.w == null ? 1 : lo.w
+        ).normalize();
+        let worldPos = localPos.applyQuaternion(fq).add(fp);
+        let worldQuat = fq.clone().multiply(localQuat);
+        tm.pose = {
+          position: { x: worldPos.x, y: worldPos.y, z: worldPos.z },
+          orientation: { x: worldQuat.x, y: worldQuat.y, z: worldQuat.z, w: worldQuat.w },
+        };
       }
 
       // Transform corners (array of {x,y,z} points)
