@@ -22,6 +22,9 @@ class ROSBoardSocketHandler(tornado.websocket.WebSocketHandler):
         # store the instance of the ROS node that created this WebSocketHandler so we can access it later
         self.node = node
 
+    def check_origin(self, origin):
+        return True
+
     def get_compression_options(self):
         # Non-None enables compression with default options.
         return {}
