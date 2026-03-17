@@ -23,6 +23,7 @@ class SmoothTransform {
 
     this._speed = options.speed || 10;
     this._immediate = options.immediate !== false; // snap to first target by default
+    this._snapDistance = options.snapDistance == null ? null : options.snapDistance;
     this._hasTarget = false;
 
     this._targetPos = new THREE.Vector3();
@@ -57,6 +58,13 @@ class SmoothTransform {
    */
   update(dt) {
     if (!this._hasTarget) return;
+    if (this._snapDistance != null) {
+      let d2 = this.group.position.distanceToSquared(this._targetPos);
+      if (d2 > this._snapDistance * this._snapDistance) {
+        this.snap();
+        return;
+      }
+    }
     let t = Math.min(1.0, this._speed * dt);
     this.group.position.lerp(this._targetPos, t);
     this.group.quaternion.slerp(this._targetQuat, t);

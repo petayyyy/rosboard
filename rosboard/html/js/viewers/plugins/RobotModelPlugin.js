@@ -23,7 +23,8 @@ class RobotModelPlugin {
     this.onLoadCallback = options.onLoad || null;
     this.onErrorCallback = options.onError || null;
 
-    this._smooth = new SmoothTransform(scene, { speed: 10 });
+    // Faster catch-up + snap on big teleports to avoid visible lag
+    this._smooth = new SmoothTransform(scene, { speed: 25, snapDistance: 0.75 });
     this.group = this._smooth.group;
 
     this._model = null;

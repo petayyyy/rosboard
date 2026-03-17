@@ -21,9 +21,8 @@ var TFUtils = {
    * @returns {{ position: THREE.Vector3, quaternion: THREE.Quaternion } | null}
    */
   getFrameWorldTransform: function(frameId, rootFrameId, tfTree) {
-    if (!frameId || frameId === rootFrameId) {
-      return { position: new THREE.Vector3(), quaternion: new THREE.Quaternion() };
-    }
+    if (!frameId) return null;
+    if (frameId === rootFrameId) return { position: new THREE.Vector3(), quaternion: new THREE.Quaternion() };
     if (!tfTree || !tfTree[frameId]) return null;
     return {
       position: tfTree[frameId].position.clone(),

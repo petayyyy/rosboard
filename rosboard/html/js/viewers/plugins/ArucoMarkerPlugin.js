@@ -26,7 +26,7 @@ class ArucoMarkerPlugin {
     this._labelElements = {};   // key → jQuery element
     this._lastMarkers = [];
     this._visible = true;
-    this._smoothSpeed = 8;      // SmoothTransform speed for markers
+    this._smoothSpeed = 14;     // SmoothTransform speed for markers (camera data is noisy)
   }
 
   // ── ArUco Texture Generation ─────────────────────────────
@@ -118,7 +118,7 @@ class ArucoMarkerPlugin {
     if (this._markerObjects[id]) return this._markerObjects[id];
 
     let markerSize = size || 0.15;
-    let smooth = new SmoothTransform(this.group, { speed: this._smoothSpeed });
+    let smooth = new SmoothTransform(this.group, { speed: this._smoothSpeed, snapDistance: 1.5 });
 
     // ArUco textured plane
     let texture = this._generateArucoTexture(id);

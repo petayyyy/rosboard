@@ -450,8 +450,43 @@ class TFViewer extends Viewer {
     let markers = msg.markers || [];
     if (markers.length === 0) return;
 
-    let frameId = msg.header?.frame_id || '';
     let rootId = this.selectedFrameId || '';
+
+    // aruco_det_loc/msg/MarkerArray: common header.frame_id
+    // visualization_msgs/msg/MarkerArray: per-marker header.frame_id (no common header)
+    let hasPerMarkerHeader = !!(markers[0] && markers[0].header && typeof markers[0].header.frame_id === "string");
+
+    if (hasPerMarkerHeader) {
+      // Convert visualization_msgs/Marker into our marker format {id,size,pose,corners}
+      let converted = [];
+      for (let i = 0; i < markers.length; i++) {
+        let m = markers[i];
+        if (m == null) continue;
+        if (m.id == null) continue;
+
+        let frameId = m.header?.frame_id || "";
+        if (!frameId) continue;
+
+        // visualization_msgs/Marker: pose is {position, orientation}
+        let pose = m.pose ? { position: m.pose.position, orientation: m.pose.orientation } : null;
+        let size = (m.scale && (m.scale.x || m.scale.y)) ? Math.max(m.scale.x || 0, m.scale.y || 0) : undefined;
+
+        converted.push({ id: m.id, size, pose, corners: null, _frame_id: frameId });
+      }
+
+      // Transform each marker from its own frame into root
+      let transformed = [];
+      for (let i = 0; i < converted.length; i++) {
+        let cm = converted[i];
+        let one = TFUtils.transformMarkers([cm], cm._frame_id, rootId, this._lastTree);
+        if (one && one.length) transformed.push(one[0]);
+      }
+      this.arucoPlugin.updateMarkers(transformed);
+      return;
+    }
+
+    let frameId = msg.header?.frame_id || "";
+    if (!frameId) return;
 
     // Transform markers from source frame into root TF frame
     let transformed = TFUtils.transformMarkers(markers, frameId, rootId, this._lastTree);
