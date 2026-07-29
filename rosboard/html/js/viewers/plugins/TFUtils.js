@@ -11,6 +11,33 @@
 var TFUtils = {
 
   /**
+   * True when a pose actually carries a measurement.
+   *
+   * aruco_detect_node publishes a ZERO quaternion to mean "no PnP solution for
+   * this frame" (setPoseUnavailable): per-marker PnP is capped at pnp_fps_cap
+   * (10 Hz by default) while /aruco/det/markers is published at the detection
+   * rate, and map markers never carry a pose on that topic at all — their pose
+   * is solved globally by aruco_loc_node.
+   *
+   * This must be checked BEFORE any transform: THREE.Quaternion.normalize()
+   * silently rewrites a zero quaternion into identity, after which the marker
+   * is indistinguishable from a real pose at the frame origin and gets
+   * rendered as a pile of markers sitting on the world origin.
+   *
+   * @param {Object} pose - { position: {x,y,z}, orientation: {x,y,z,w} }
+   * @returns {boolean}
+   */
+  isPoseUsable: function(pose) {
+    if (!pose || !pose.position || !pose.orientation) return false;
+    let finite = function(v) { return typeof v === "number" && isFinite(v); };
+    let p = pose.position;
+    let q = pose.orientation;
+    if (!finite(p.x) || !finite(p.y) || !finite(p.z)) return false;
+    if (!finite(q.x) || !finite(q.y) || !finite(q.z) || !finite(q.w)) return false;
+    return (q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w) > 1e-12;
+  },
+
+  /**
    * Get the world-space position and quaternion of a TF frame.
    * Returns null if the frame is not found in the tree.
    * If frameId === rootFrameId, returns identity (origin).
@@ -39,10 +66,13 @@ var TFUtils = {
    * @param {string} frameId - frame the pose is in
    * @param {string} rootFrameId
    * @param {Object} tfTree
-   * @returns {Object} transformed pose, or original if no transform needed
+   * @returns {Object|null} transformed pose, the original if no transform is
+   *   needed, or null if the pose carries no usable measurement
    */
   transformPose: function(pose, frameId, rootFrameId, tfTree) {
     if (!pose) return pose;
+    // See isPoseUsable: never fabricate identity out of a "no pose" sentinel.
+    if (!TFUtils.isPoseUsable(pose)) return null;
 
     let ft = TFUtils.getFrameWorldTransform(frameId, rootFrameId, tfTree);
     if (!ft) return pose; // frame unknown, pass through
@@ -53,13 +83,11 @@ var TFUtils = {
     // Identity check — skip math if at origin with no rotation
     if (fp.lengthSq() < 1e-12 && Math.abs(1 - fq.w) < 1e-6) return pose;
 
-    let lp = pose.position || {};
-    let lo = pose.orientation || {};
+    let lp = pose.position;
+    let lo = pose.orientation;
 
-    let localPos = new THREE.Vector3(lp.x || 0, lp.y || 0, lp.z || 0);
-    let localQuat = new THREE.Quaternion(
-      lo.x || 0, lo.y || 0, lo.z || 0, lo.w == null ? 1 : lo.w
-    ).normalize();
+    let localPos = new THREE.Vector3(lp.x, lp.y, lp.z);
+    let localQuat = new THREE.Quaternion(lo.x, lo.y, lo.z, lo.w).normalize();
 
     let worldPos = localPos.applyQuaternion(fq).add(fp);
     let worldQuat = fq.clone().multiply(localQuat);
@@ -96,20 +124,23 @@ var TFUtils = {
       let m = markers[i];
       let tm = { id: m.id, size: m.size };
 
-      // Transform pose (using pre-computed fp/fq, not re-looking up)
-      if (m.pose) {
-        let lp = m.pose.position || {};
-        let lo = m.pose.orientation || {};
-        let localPos = new THREE.Vector3(lp.x || 0, lp.y || 0, lp.z || 0);
-        let localQuat = new THREE.Quaternion(
-          lo.x || 0, lo.y || 0, lo.z || 0, lo.w == null ? 1 : lo.w
-        ).normalize();
+      // Transform pose (using pre-computed fp/fq, not re-looking up).
+      // A marker without a usable pose keeps pose=null instead of being
+      // transformed into a fake identity at the frame origin — corners below
+      // are still transformed, so the detection itself is not lost.
+      if (TFUtils.isPoseUsable(m.pose)) {
+        let lp = m.pose.position;
+        let lo = m.pose.orientation;
+        let localPos = new THREE.Vector3(lp.x, lp.y, lp.z);
+        let localQuat = new THREE.Quaternion(lo.x, lo.y, lo.z, lo.w).normalize();
         let worldPos = localPos.applyQuaternion(fq).add(fp);
         let worldQuat = fq.clone().multiply(localQuat);
         tm.pose = {
           position: { x: worldPos.x, y: worldPos.y, z: worldPos.z },
           orientation: { x: worldQuat.x, y: worldQuat.y, z: worldQuat.z, w: worldQuat.w },
         };
+      } else {
+        tm.pose = null;
       }
 
       // Transform corners (array of {x,y,z} points)

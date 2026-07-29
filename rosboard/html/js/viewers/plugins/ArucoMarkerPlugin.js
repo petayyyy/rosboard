@@ -6,6 +6,13 @@
 //
 // Each marker is displayed as a textured plane with the ArUco grid pattern,
 // positioned and oriented via pose, plus an ID label overhead.
+//
+// `pose` is optional. On /aruco/det/markers it is present only on frames where
+// per-marker PnP actually ran (capped by pnp_fps_cap, 10 Hz by default) and for
+// markers selected by publish_non_map_marker_poses/non_map_pose_ids; map markers
+// never carry one there. Everything else arrives with a zero quaternion meaning
+// "no pose". Markers are rendered only once a usable pose has been seen, and
+// they hold that pose through the gaps between solves.
 
 class ArucoMarkerPlugin {
   /**
@@ -146,7 +153,11 @@ class ArucoMarkerPlugin {
     let axes = new THREE.AxesHelper(markerSize * 0.6);
     smooth.group.add(axes);
 
-    let obj = { smooth, mesh, border, axes, geo, mat, texture, size: markerSize };
+    let obj = {
+      smooth, mesh, border, axes, geo, mat, texture, size: markerSize,
+      hasPose: false,   // a usable pose has been received at least once
+      lastPose: null,   // last usable pose, held across frames without PnP
+    };
     this._markerObjects[id] = obj;
     return obj;
   }
@@ -158,24 +169,40 @@ class ArucoMarkerPlugin {
    */
   updateMarkers(markers) {
     if (!Array.isArray(markers)) return;
-    this._lastMarkers = markers;
 
     let activeIds = new Set();
+    let placed = [];
 
     for (let i = 0; i < markers.length; i++) {
       let m = markers[i];
       if (m.id == null) continue;
-      activeIds.add(m.id);
 
+      // Detection without a pose: either PnP is disabled for this marker, or
+      // this frame fell between two solves (pnp_fps_cap). See
+      // TFUtils.isPoseUsable. Such a marker has no place in a 3D scene — the
+      // old code dropped it on the world origin.
+      let usable = TFUtils.isPoseUsable(m.pose);
+      let known = this._markerObjects[m.id];
+      if (!usable && !(known && known.hasPose)) continue;
+
+      activeIds.add(m.id);
       let obj = this._getOrCreateMarker(m.id, m.size);
 
-      // Set target pose (SmoothTransform will interpolate in updateSmooth)
-      if (m.pose) {
+      // Set target pose (SmoothTransform will interpolate in updateSmooth).
+      // Frames without a fresh solve keep the last known pose instead of
+      // blinking the marker out — the gaps are expected, not a loss of track.
+      if (usable) {
         obj.smooth.setTarget(m.pose.position, m.pose.orientation);
+        obj.lastPose = m.pose;
+        obj.hasPose = true;
       }
 
       obj.smooth.group.visible = this._visible;
+      placed.push({ id: m.id, size: m.size, pose: obj.lastPose });
     }
+
+    // Labels follow what is actually rendered, not what arrived.
+    this._lastMarkers = placed;
 
     // Hide markers that are no longer present
     for (let id in this._markerObjects) {
