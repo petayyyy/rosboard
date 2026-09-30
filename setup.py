@@ -29,6 +29,7 @@ setup(
             'html/js/viewers/meta/*',
             'html/js/viewers/plugins/*',
             'html/js/transports/*',
+            'html/js/vendor/three/*',
             'html/models/*',
         ]
     },

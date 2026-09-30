@@ -8,6 +8,7 @@ importJsOnce("js/viewers/meta/Space3DViewer.js");
 importJsOnce("js/viewers/plugins/SmoothTransform.js");
 importJsOnce("js/viewers/plugins/TFUtils.js");
 importJsOnce("js/viewers/plugins/RobotModelPlugin.js");
+importJsOnce("js/viewers/plugins/ArucoDictionary.js");
 importJsOnce("js/viewers/plugins/ArucoMarkerPlugin.js");
 
 importJsOnce("js/viewers/TFViewer.js");
@@ -104,6 +105,10 @@ let onOpen = function() {
     initSubscribe({topicName: topic_name, topicType: subscriptions[topic_name].topicType});
   }
 
+  // Topics viewers pull in themselves (TFViewer: /tf_static, ArUco maps) —
+  // lost on every reconnect before, leaving the 3D view without them.
+  Viewer.resubscribeSecondary();
+
 
 }
 
@@ -120,10 +125,13 @@ let onSystem = function(system) {
 }
 
 let onMsg = function(msg) {
+  // Secondary handlers get the message even when the topic also has its own
+  // card (TFViewer on /tf pulls /tf_static while a /tf_static card is open).
+  let handled = Viewer.dispatchSecondary(msg);
   if(subscriptions[msg._topic_name] && subscriptions[msg._topic_name].viewer) {
     subscriptions[msg._topic_name].viewer.update(msg);
-  } else if(Viewer._secondaryHandlers[msg._topic_name]) {
-    Viewer._secondaryHandlers[msg._topic_name](msg);
+  } else if(handled) {
+    // delivered to secondary handlers only
   } else if(!subscriptions[msg._topic_name]) {
     console.log("Received unsolicited message", msg);
   } else {
@@ -349,10 +357,20 @@ $(() => {
   });
 });
 
+// Used by Viewer.unsubscribeSecondary: keep the subscription while the
+// topic's own card is open.
+Viewer._hasPrimary = (topicName) => !!(subscriptions[topicName] && subscriptions[topicName].viewer);
+
 Viewer.onClose = function(viewerInstance) {
   let topicName = viewerInstance.topicName;
   let topicType = viewerInstance.topicType;
-  currentTransport.unsubscribe({topicName:topicName});
+  // destroy() stops render loops and drops the viewer's secondary
+  // subscriptions (TFViewer kept animating and receiving after close).
+  try { viewerInstance.destroy(); } catch (e) { console.error(e); }
+  // Another viewer may still listen to this topic as a secondary.
+  if(!Viewer._secondaryHandlers[topicName]) {
+    currentTransport.unsubscribe({topicName:topicName});
+  }
   $grid.masonry("remove", viewerInstance.card);
   $grid.masonry("layout");
   delete(subscriptions[topicName].viewer);

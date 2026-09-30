@@ -54,6 +54,26 @@ class ROSBoardNode(object):
         # dict of topic_name -> float (time in seconds)
         self.last_data_times_by_topic = {}
 
+        # TF topics (tf2_msgs/TFMessage) are not throttled by dropping messages:
+        # /tf is published by several nodes, one frame per message, and
+        # /tf_static arrives as a burst of latched messages on subscribe, so
+        # dropping by time loses whole frames. Instead every edge is merged
+        # into a cache and the client gets a full snapshot at most once per
+        # update interval (see on_tf_msg).
+        # topic_name -> {(parent, child): (receive_time, transform_dict)}
+        self.tf_cache = {}
+        # topics whose cache changed since the last snapshot was sent
+        self.tf_dirty = set()
+        # static topics: edges changed since the last send. /tf_static is
+        # sent as deltas (a full snapshot only to a newly subscribed client):
+        # some nodes put changing edges there (base_link->terrain), and
+        # re-sending all ~70 map edges at the update rate would flood the
+        # drone's Wi-Fi.
+        self.tf_changed_keys = {}
+        # topics with a delayed snapshot already scheduled
+        self.tf_flush_pending = set()
+        self.tf_lock = threading.Lock()
+
         if rospy.__name__ == "rospy2":
             # ros2 hack: need to subscribe to at least 1 topic
             # before dynamic subscribing will work later.
@@ -264,7 +284,15 @@ class ROSBoardNode(object):
                         # In ros2 we also can pass QoS parameters to the subscriber.
                         # To avoid incompatibilities we subscribe using the same Qos
                         # of the topic's publishers
-                        kwargs = {"qos": self.get_topic_qos(topic_name)}
+                        # Only TF gets an explicit QoS. rospy2.Subscriber used
+                        # to ignore the qos argument entirely (always
+                        # BEST_EFFORT/VOLATILE); now that it honours a
+                        # QoSProfile, other topics deliberately keep that
+                        # default instead of copying the first publisher's
+                        # QoS (a RELIABLE copy is incompatible with any
+                        # BEST_EFFORT publisher on the same topic).
+                        if is_tf_type(topic_type):
+                            kwargs = {"qos": tf_qos(topic_name)}
                     self.local_subs[topic_name] = rospy.Subscriber(
                         topic_name,
                         self.get_msg_class(topic_type),
@@ -353,6 +381,10 @@ class ROSBoardNode(object):
         ROS messaged received (any topic or type).
         """
         topic_name, topic_type = topic_info
+        if is_tf_type(topic_type):
+            self.on_tf_msg(msg, topic_name, topic_type)
+            return
+
         t = time.time()
         if t - self.last_data_times_by_topic.get(topic_name, 0) < self.update_intervals_by_topic[topic_name] - 1e-4:
             return
@@ -376,6 +408,136 @@ class ROSBoardNode(object):
             ROSBoardSocketHandler.broadcast,
             [ROSBoardSocketHandler.MSG_MSG, ros_msg_dict]
         )
+
+    def on_tf_msg(self, msg, topic_name, topic_type):
+        """
+        TF message received: merge its edges into the cache and send a
+        snapshot, now or as soon as the update interval allows.
+        """
+        if self.event_loop is None:
+            return
+
+        now = time.time()
+        changed = False
+        with self.tf_lock:
+            cache = self.tf_cache.setdefault(topic_name, {})
+            for transform in msg.transforms:
+                key = (transform.header.frame_id, transform.child_frame_id)
+                value = ros2dict(transform)
+                old = cache.get(key)
+                # /tf_static is republished unchanged by some nodes; comparing
+                # without the stamp keeps it from being re-sent every time.
+                if old is None or tf_payload(old[1]) != tf_payload(value):
+                    changed = True
+                    self.tf_changed_keys.setdefault(topic_name, set()).add(key)
+                cache[key] = (now, value)
+            if changed or not is_static_tf(topic_name):
+                self.tf_dirty.add(topic_name)
+            if topic_name not in self.tf_dirty or topic_name in self.tf_flush_pending:
+                return
+
+            interval = self.update_intervals_by_topic.get(topic_name, 0.1)
+            wait = interval - (now - self.last_data_times_by_topic.get(topic_name, 0.0))
+            self.tf_flush_pending.add(topic_name)
+
+        if wait <= 0:
+            self.event_loop.add_callback(self.tf_flush, topic_name, topic_type)
+        else:
+            self.event_loop.add_callback(
+                lambda: self.event_loop.call_later(wait, self.tf_flush, topic_name, topic_type)
+            )
+
+    def tf_snapshot_msg(self, topic_name, topic_type=None):
+        """
+        Full current state of a TF topic as a TFMessage-like dict, or None if
+        nothing has been received. Stale dynamic edges are evicted here.
+        """
+        with self.tf_lock:
+            cache = self.tf_cache.get(topic_name)
+            if not cache:
+                return None
+            if not is_static_tf(topic_name):
+                cutoff = time.time() - TF_DYNAMIC_TTL
+                for key in [k for k, (t, _) in cache.items() if t < cutoff]:
+                    del cache[key]
+            transforms = [value for (_, value) in cache.values()]
+        return {
+            "transforms": transforms,
+            "_topic_name": topic_name,
+            "_topic_type": topic_type or "tf2_msgs/msg/TFMessage",
+            "_time": time.time() * 1000,
+            "_tf_snapshot": True,
+        }
+
+    def tf_flush(self, topic_name, topic_type):
+        """
+        Send TF to all subscribers. Runs on the tornado loop. /tf goes as a
+        full snapshot (a handful of edges), /tf_static as the changed edges.
+        """
+        with self.tf_lock:
+            self.tf_flush_pending.discard(topic_name)
+            self.tf_dirty.discard(topic_name)
+            self.last_data_times_by_topic[topic_name] = time.time()
+            changed_keys = self.tf_changed_keys.pop(topic_name, set())
+            if is_static_tf(topic_name):
+                cache = self.tf_cache.get(topic_name, {})
+                transforms = [cache[k][1] for k in changed_keys if k in cache]
+                message = {
+                    "transforms": transforms,
+                    "_topic_name": topic_name,
+                    "_topic_type": topic_type,
+                    "_time": time.time() * 1000,
+                    "_tf_snapshot": True,
+                    "_tf_delta": True,
+                } if transforms else None
+        if not is_static_tf(topic_name):
+            message = self.tf_snapshot_msg(topic_name, topic_type)
+        if message is not None:
+            ROSBoardSocketHandler.broadcast([ROSBoardSocketHandler.MSG_MSG, message])
+
+
+# Dynamic TF edges not updated for this long are dropped from the snapshot
+# (publisher stopped); static ones are kept forever.
+TF_DYNAMIC_TTL = 10.0
+
+
+def is_tf_type(topic_type):
+    return topic_type in ("tf2_msgs/msg/TFMessage", "tf2_msgs/TFMessage", "tf/tfMessage")
+
+
+def is_static_tf(topic_name):
+    return topic_name.rstrip("/").endswith("tf_static")
+
+
+def tf_payload(transform_dict):
+    """Transform without the header stamp — what actually defines the edge."""
+    return (
+        transform_dict.get("header", {}).get("frame_id"),
+        transform_dict.get("child_frame_id"),
+        repr(transform_dict.get("transform")),
+    )
+
+
+def tf_qos(topic_name):
+    """
+    Fixed QoS for TF topics instead of copying the first publisher's.
+    /tf_static must be TRANSIENT_LOCAL + RELIABLE or latched static transforms
+    published before rosboard subscribed never arrive (previously it fell back
+    to BEST_EFFORT/VOLATILE when there was no publisher yet). /tf is
+    BEST_EFFORT so it matches both reliable and best-effort publishers.
+    """
+    if is_static_tf(topic_name):
+        return QoSProfile(
+            depth=100,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
+    return QoSProfile(
+        depth=100,
+        reliability=QoSReliabilityPolicy.BEST_EFFORT,
+        durability=QoSDurabilityPolicy.VOLATILE,
+    )
+
 
 def main(args=None):
     ROSBoardNode().start()

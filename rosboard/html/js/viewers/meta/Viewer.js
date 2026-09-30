@@ -226,22 +226,52 @@ Viewer.maxUpdateRate = 50.0;
 Viewer._viewers = [];
 
 // Secondary subscription handlers: allows a viewer to receive data from additional topics.
-// Map of topicName -> callback(msg).
+// Map of topicName -> Set of callback(msg). Several viewers may listen to the
+// same topic (e.g. two TF viewers both pulling /tf_static), and a topic may
+// also have its own card: index.js delivers to the card and to every handler.
 Viewer._secondaryHandlers = {};
 Viewer._transport = null; // set by index.js after transport init
 
 Viewer.subscribeSecondary = (topicName, callback) => {
-  Viewer._secondaryHandlers[topicName] = callback;
-  if (Viewer._transport) {
+  let handlers = Viewer._secondaryHandlers[topicName];
+  if (!handlers) handlers = Viewer._secondaryHandlers[topicName] = new Set();
+  handlers.add(callback);
+  // While disconnected the handler just waits: resubscribeSecondary() sends
+  // it on the next connect (ws.send on a closed socket would throw).
+  if (Viewer._transport && Viewer._transport.isConnected()) {
     Viewer._transport.subscribe({ topicName: topicName });
   }
 };
 
-Viewer.unsubscribeSecondary = (topicName) => {
+/** Re-send secondary subscriptions after a (re)connect. */
+Viewer.resubscribeSecondary = () => {
+  if (!Viewer._transport || !Viewer._transport.isConnected()) return;
+  for (let topicName in Viewer._secondaryHandlers) {
+    Viewer._transport.subscribe({ topicName: topicName });
+  }
+};
+
+// callback omitted = drop all handlers of the topic (old behaviour).
+Viewer.unsubscribeSecondary = (topicName, callback) => {
+  let handlers = Viewer._secondaryHandlers[topicName];
+  if (!handlers) return;
+  if (callback) handlers.delete(callback);
+  else handlers.clear();
+  if (handlers.size) return;
   delete Viewer._secondaryHandlers[topicName];
-  if (Viewer._transport) {
+  // The topic's own card, if any, still needs the subscription.
+  if (Viewer._transport && Viewer._transport.isConnected() && !(Viewer._hasPrimary && Viewer._hasPrimary(topicName))) {
     Viewer._transport.unsubscribe({ topicName: topicName });
   }
+};
+
+Viewer.dispatchSecondary = (msg) => {
+  let handlers = Viewer._secondaryHandlers[msg._topic_name];
+  if (!handlers) return false;
+  handlers.forEach((cb) => {
+    try { cb(msg); } catch (e) { console.error(e); }
+  });
+  return true;
 };
 
 // override this

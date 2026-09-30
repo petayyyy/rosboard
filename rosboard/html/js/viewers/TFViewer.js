@@ -1,7 +1,19 @@
 "use strict";
 
-// TF Viewer v5.0 — Three.js + Plugin Architecture
+// TF Viewer v6.0 — Three.js + Plugin Architecture
 // Orchestrates: TF frames, RobotModelPlugin, ArucoMarkerPlugin.
+//
+// One tree from /tf AND /tf_static: whichever of the two the card is opened
+// on, the other one is pulled in as a secondary subscription (a card on /tf
+// alone never saw base_link->camera or the ArUco map frames). rosboard sends
+// TF as merged snapshots (/tf_static as deltas), so nothing is dropped here.
+//
+// ArUco maps (*/map/markers) are placed by their own TF frames — aruco_<id>
+// for the main map, <map frame>_<id> for extra maps like aruco_land_1 — so the
+// 3D map sits exactly where the localisation puts it. A map whose frame is not
+// connected to the tree (aruco_land_1 before it is detected) is hidden instead
+// of being dropped on the world origin. /aruco/det/markers highlights what the
+// camera sees right now.
 
 class TFViewer extends Viewer {
   onCreate() {
@@ -20,8 +32,21 @@ class TFViewer extends Viewer {
     this._frameAxes = {};
     this._frameLinks = {};
 
-    // Secondary ArUco topic names we subscribed to
-    this._arucoTopicNames = [];
+    // Secondary ArUco topic names we subscribed to (topic -> callback)
+    this._arucoTopics = {};
+    // Last message per ArUco source (topic -> msg)
+    this._arucoSources = {};
+    this._arucoStatus = {};
+    // TF frames that are drawn as markers (axes/labels hidden by default)
+    this._markerFrames = new Set();
+    this.showMarkerFrames = false;
+    this._lastArucoRefresh = 0;
+    this._detectedAt = 0;
+    this.follow = false;
+    this._needsUpdate = false;
+
+    // Full-window mode (rviz.html): canvas fills the card instead of 1:1
+    this.fullPage = !!(this.card && this.card.hasClass && this.card.hasClass('rviz-card'));
 
     this._createControls();
     this._initThreeJS();
@@ -44,11 +69,27 @@ class TFViewer extends Viewer {
 
     this.arucoPlugin = new ArucoMarkerPlugin(this.scene, this.labelsOverlay, this.camera);
 
-    // Auto-discover ArUco topics after a short delay (topics arrive async)
+    // The other half of the TF tree: /tf <-> /tf_static
+    this._companionTopic = TFViewer.companionTopic(this.topicName);
+    if (this._companionTopic) {
+      this._onCompanionMsg = (msg) => this._ingestTF(msg);
+      Viewer.subscribeSecondary(this._companionTopic, this._onCompanionMsg);
+    }
+
+    // ArUco topics appear asynchronously (and extra maps can show up later),
+    // so keep discovering; it is a cheap scan of the topic list.
     let that = this;
+    this._discoverArucoTopics();
     this._arucoDiscoveryInterval = setInterval(() => {
       that._discoverArucoTopics();
     }, 2000);
+  }
+
+  /** "/tf" -> "/tf_static", "/tf_static" -> "/tf". */
+  static companionTopic(topicName) {
+    if (!topicName) return null;
+    if (topicName.endsWith("_static")) return topicName.slice(0, -"_static".length);
+    return topicName + "_static";
   }
 
   // ── UI Controls ────────────────────────────────────────────
@@ -88,6 +129,23 @@ class TFViewer extends Viewer {
     this.showArucoCheckbox = $('<input type="checkbox" checked>').appendTo(arucoLabel);
     $('<span></span>').addClass("monospace").css({"opacity": 0.6}).text("aruco").appendTo(arucoLabel);
 
+    // Green frame on the markers the camera sees right now
+    let seenLabel = $('<label></label>').css({"display": "flex", "gap": "3px", "align-items": "center", "cursor": "pointer"}).appendTo(this.controlsBar);
+    this.showSeenCheckbox = $('<input type="checkbox" checked>').appendTo(seenLabel);
+    $('<span></span>').addClass("monospace").css({"opacity": 0.6}).text("seen").appendTo(seenLabel);
+
+    let markerFramesLabel = $('<label></label>').css({"display": "flex", "gap": "3px", "align-items": "center", "cursor": "pointer"}).appendTo(this.controlsBar);
+    this.showMarkerFramesCheckbox = $('<input type="checkbox">').appendTo(markerFramesLabel);
+    $('<span></span>').addClass("monospace").css({"opacity": 0.6}).text("marker tf").appendTo(markerFramesLabel);
+
+    // Keep the camera on the drone while it flies over the field
+    this.followBtn = $('<button></button>').css({
+      "font-size": "9px", "padding": "1px 6px",
+      "background": "#444", "color": "#ccc",
+      "border": "1px solid #666", "border-radius": "3px", "cursor": "pointer",
+      "font-family": "'JetBrains Mono', monospace",
+    }).text("follow").appendTo(this.controlsBar);
+
     // Camera mode toggle: orbit / fly
     this.cameraMode = 'orbit';
     this.cameraModeBtn = $('<button></button>').css({
@@ -102,6 +160,12 @@ class TFViewer extends Viewer {
     });
 
     this.frameCountLabel = $('<span></span>').addClass("monospace").css({"opacity": 0.4, "margin-left": "auto"}).appendTo(this.controlsBar);
+
+    // Per-map ArUco status: "map 59 · aruco_land_1: no TF"
+    this.arucoStatusLabel = $('<div></div>').addClass("monospace").css({
+      "font-size": "9px", "opacity": 0.55, "padding": "0 0 2px 0", "white-space": "nowrap",
+      "overflow": "hidden", "text-overflow": "ellipsis",
+    }).appendTo(this.card.content);
 
     // Collapsible child frames
     this.childToggle = $('<div></div>').css({
@@ -131,6 +195,7 @@ class TFViewer extends Viewer {
     this.frameIdSelect.on("change", function() {
       that.selectedFrameId = $(this).val() || null;
       that._clearFrameObjects();
+      that._lastArucoRefresh = 0;
       that._updateDisplay();
     });
     this.axisScaleInput.on("change input", function() {
@@ -153,18 +218,31 @@ class TFViewer extends Viewer {
     this.showArucoCheckbox.on("change", function() {
       if (that.arucoPlugin) that.arucoPlugin.setVisible(!!$(this).is(":checked"));
     });
+    this.showSeenCheckbox.on("change", function() {
+      if (that.arucoPlugin) that.arucoPlugin.setHighlightEnabled(!!$(this).is(":checked"));
+    });
+    this.showMarkerFramesCheckbox.on("change", function() {
+      that.showMarkerFrames = !!$(this).is(":checked");
+      that._updateDisplay();
+    });
+    this.followBtn.on("click", function() {
+      that.follow = !that.follow;
+      that.followBtn.css({"background": that.follow ? "#335" : "#444"});
+      if (that.follow && that.cameraMode === 'fly') that._enableOrbitMode();
+    });
   }
 
   // ── Three.js Initialization ────────────────────────────────
 
   _initThreeJS() {
-    this.wrapper = $('<div></div>').css({
+    this.wrapper = $('<div></div>').addClass('tf-wrap').css({
       "position": "relative", "width": "100%",
     }).appendTo(this.card.content);
 
-    this.wrapper2 = $('<div></div>').css({
+    // 1:1 in a rosboard card; fills the window on rviz.html (see its CSS)
+    this.wrapper2 = $('<div></div>').addClass('tf-canvas-wrap').css({
       "width": "100%",
-      "aspect-ratio": "1",
+      "aspect-ratio": this.fullPage ? "auto" : "1",
       "background": "#1a1a2e",
       "position": "relative",
       "overflow": "hidden",
@@ -226,6 +304,17 @@ class TFViewer extends Viewer {
       let now = performance.now();
       let delta = Math.min((now - lastFrameTime) / 1000, 0.1); // seconds, capped
       lastFrameTime = now;
+
+      // Many TF messages per frame -> one tree rebuild per frame
+      if (that._needsUpdate && !that.isPaused) {
+        that._needsUpdate = false;
+        that._updateDisplay();
+      }
+      if (that.follow) that._followBaseLink();
+      if (that._detectedAt && now - that._detectedAt > 1000) {
+        that._detectedAt = 0;
+        if (that.arucoPlugin) that.arucoPlugin.setDetected([]);
+      }
 
       if (that.cameraMode === 'fly') {
         that._updateFlyMovement(delta);
@@ -427,70 +516,148 @@ class TFViewer extends Viewer {
     ];
 
     for (let topicName in topics) {
-      let topicType = topics[topicName];
-      if (arucoTypes.includes(topicType) && !this._arucoTopicNames.includes(topicName)) {
-        this._arucoTopicNames.push(topicName);
-        let that = this;
-        Viewer.subscribeSecondary(topicName, (msg) => {
-          that._onArucoData(msg);
-        });
-        console.log('[TFViewer] Auto-subscribed to ArUco topic:', topicName);
-      }
-    }
-
-    // Stop polling once we found topics (or after topics are available)
-    if (Object.keys(topics).length > 0) {
-      clearInterval(this._arucoDiscoveryInterval);
-      this._arucoDiscoveryInterval = null;
+      if (this._arucoTopics[topicName]) continue;
+      if (!arucoTypes.includes(topics[topicName])) continue;
+      let cb = (msg) => this._onArucoData(msg, topicName);
+      this._arucoTopics[topicName] = cb;
+      Viewer.subscribeSecondary(topicName, cb);
+      console.log('[TFViewer] Auto-subscribed to ArUco topic:', topicName);
     }
   }
 
-  _onArucoData(msg) {
+  /** Map topics carry the whole map; det topics the current detections. */
+  static arucoSourceKind(topicName) {
+    if (/\/det\/markers$/.test(topicName)) return 'det';
+    if (/\/map\/markers$/.test(topicName)) return 'map';
+    return 'generic';
+  }
+
+  _onArucoData(msg, topicName) {
     if (!this.arucoPlugin) return;
-    let markers = msg.markers || [];
-    if (markers.length === 0) return;
+    this._arucoSources[topicName] = msg;
 
-    let rootId = this.selectedFrameId || '';
-
-    // aruco_det_loc/msg/MarkerArray: common header.frame_id
-    // visualization_msgs/msg/MarkerArray: per-marker header.frame_id (no common header)
-    let hasPerMarkerHeader = !!(markers[0] && markers[0].header && typeof markers[0].header.frame_id === "string");
-
-    if (hasPerMarkerHeader) {
-      // Convert visualization_msgs/Marker into our marker format {id,size,pose,corners}
-      let converted = [];
-      for (let i = 0; i < markers.length; i++) {
-        let m = markers[i];
-        if (m == null) continue;
-        if (m.id == null) continue;
-
-        let frameId = m.header?.frame_id || "";
-        if (!frameId) continue;
-
-        // visualization_msgs/Marker: pose is {position, orientation}
-        let pose = m.pose ? { position: m.pose.position, orientation: m.pose.orientation } : null;
-        let size = (m.scale && (m.scale.x || m.scale.y)) ? Math.max(m.scale.x || 0, m.scale.y || 0) : undefined;
-
-        converted.push({ id: m.id, size, pose, corners: null, _frame_id: frameId });
-      }
-
-      // Transform each marker from its own frame into root
-      let transformed = [];
-      for (let i = 0; i < converted.length; i++) {
-        let cm = converted[i];
-        let one = TFUtils.transformMarkers([cm], cm._frame_id, rootId, this._lastTree);
-        if (one && one.length) transformed.push(one[0]);
-      }
-      this.arucoPlugin.updateMarkers(transformed);
-      return;
+    if (TFViewer.arucoSourceKind(topicName) === 'det') {
+      let ids = (msg.markers || []).map((m) => m && m.id).filter((id) => id != null);
+      this.arucoPlugin.setDetected(ids);
+      this._detectedAt = performance.now();
     }
+    this._refreshArucoSource(topicName);
+  }
 
+  /** Re-place every source against the current TF tree. */
+  _refreshAruco() {
+    this._markerFrames = new Set();
+    for (let topicName in this._arucoSources) this._refreshArucoSource(topicName);
+    this._lastArucoRefresh = performance.now();
+    this._renderArucoStatus();
+  }
+
+  _refreshArucoSource(topicName) {
+    let msg = this._arucoSources[topicName];
+    if (!msg || !this.arucoPlugin) return;
+    let kind = TFViewer.arucoSourceKind(topicName);
+    let placed;
+    if (kind === 'map') placed = this._placeMapMarkers(msg, topicName);
+    else if (kind === 'det') placed = this._placeDetectedMarkers(msg, topicName);
+    else placed = this._placeGenericMarkers(msg);
+    this.arucoPlugin.updateMarkers(placed, topicName);
+  }
+
+  /** Root-frame pose of a TF frame, or null if it is not connected to root. */
+  _framePose(frameId) {
+    let ft = TFUtils.getFrameWorldTransform(frameId, this.selectedFrameId, this._lastTree);
+    if (!ft) return null;
+    return {
+      position: { x: ft.position.x, y: ft.position.y, z: ft.position.z },
+      orientation: { x: ft.quaternion.x, y: ft.quaternion.y, z: ft.quaternion.z, w: ft.quaternion.w },
+    };
+  }
+
+  _placeMapMarkers(msg, topicName) {
     let frameId = msg.header?.frame_id || "";
-    if (!frameId) return;
+    let markers = msg.markers || [];
+    let out = [];
+    let viaTf = 0;
+    for (let i = 0; i < markers.length; i++) {
+      let m = markers[i];
+      if (!m || m.id == null) continue;
+      // aruco_map publishes one static frame per marker: <map frame>_<id>
+      // for extra maps (aruco_land_1_100), aruco_<id> for the main one.
+      let pose = null;
+      for (let frame of [frameId + "_" + m.id, "aruco_" + m.id]) {
+        pose = this._framePose(frame);
+        if (pose) { this._markerFrames.add(frame); viaTf++; break; }
+      }
+      // No per-marker frame: fall back to the message pose, but only if its
+      // frame is connected to the tree — never guess the origin.
+      if (!pose && (frameId === this.selectedFrameId || (this._lastTree && this._lastTree[frameId]))) {
+        pose = TFUtils.transformPose(m.pose, frameId, this.selectedFrameId, this._lastTree);
+      }
+      if (pose) out.push({ id: m.id, size: m.size, pose: pose });
+    }
+    this._arucoStatus[topicName] = out.length
+      ? { label: this._mapLabel(topicName, frameId), text: String(out.length) + (viaTf ? "" : " (msg)") }
+      : { label: this._mapLabel(topicName, frameId), text: "no TF for " + frameId, bad: true };
+    return out;
+  }
 
-    // Transform markers from source frame into root TF frame
-    let transformed = TFUtils.transformMarkers(markers, frameId, rootId, this._lastTree);
-    this.arucoPlugin.updateMarkers(transformed);
+  _mapLabel(topicName, frameId) {
+    let m = /\/aruco\/(.+)\/map\/markers$/.exec(topicName);
+    return m ? m[1] : (frameId === "map" ? "map" : frameId || topicName);
+  }
+
+  /**
+   * Detections with their own PnP pose (markers outside every map) — map
+   * markers are already drawn by the map sources and are only highlighted.
+   */
+  _placeDetectedMarkers(msg, topicName) {
+    let frameId = msg.header?.frame_id || "";
+    if (!frameId || !(frameId === this.selectedFrameId || (this._lastTree && this._lastTree[frameId]))) return [];
+    let onMaps = this.arucoPlugin.placedIdsExcept(topicName);
+    let out = [];
+    (msg.markers || []).forEach((m) => {
+      if (!m || m.id == null || onMaps.has(Number(m.id))) return;
+      if (!TFUtils.isPoseUsable(m.pose)) return;
+      let pose = TFUtils.transformPose(m.pose, frameId, this.selectedFrameId, this._lastTree);
+      if (pose) out.push({ id: m.id, size: m.size, pose: pose });
+    });
+    return out;
+  }
+
+  /** visualization_msgs/MarkerArray: per-marker header.frame_id. */
+  _placeGenericMarkers(msg) {
+    let markers = msg.markers || [];
+    let hasPerMarkerHeader = !!(markers[0] && markers[0].header && typeof markers[0].header.frame_id === "string");
+    let out = [];
+    if (!hasPerMarkerHeader) {
+      let frameId = msg.header?.frame_id || "";
+      if (!frameId) return out;
+      return TFUtils.transformMarkers(markers, frameId, this.selectedFrameId, this._lastTree) || [];
+    }
+    markers.forEach((m) => {
+      if (!m || m.id == null) return;
+      let frameId = m.header?.frame_id || "";
+      if (!frameId) return;
+      let pose = m.pose ? { position: m.pose.position, orientation: m.pose.orientation } : null;
+      let size = (m.scale && (m.scale.x || m.scale.y)) ? Math.max(m.scale.x || 0, m.scale.y || 0) : undefined;
+      let t = TFUtils.transformPose(pose, frameId, this.selectedFrameId, this._lastTree);
+      if (t) out.push({ id: m.id, size: size, pose: t });
+    });
+    return out;
+  }
+
+  _renderArucoStatus() {
+    if (!this.arucoStatusLabel) return;
+    let parts = [];
+    for (let topic in this._arucoStatus) {
+      let st = this._arucoStatus[topic];
+      parts.push((st.bad ? "\u26A0 " : "") + st.label + ": " + st.text);
+    }
+    for (let topic in this._arucoSources) {
+      if (TFViewer.arucoSourceKind(topic) !== 'det' || !this._detectedAt) continue;
+      parts.push("seen: " + (this._arucoSources[topic].markers || []).length);
+    }
+    this.arucoStatusLabel.text(parts.length ? "aruco  " + parts.join("  \u00B7  ") : "");
   }
 
   // ── TF Data Management ────────────────────────────────────
@@ -611,8 +778,12 @@ class TFViewer extends Viewer {
     this._lastTree = tree;
     let activeChildIds = new Set();
 
+    // Markers follow the tree (map offset, root change); 5 Hz is plenty
+    if (performance.now() - this._lastArucoRefresh > 200) this._refreshAruco();
+
     for (let childId in tree) {
       if (!this.visibleChildFrames.has(childId)) continue;
+      if (!this.showMarkerFrames && this._markerFrames.has(childId)) continue;
       activeChildIds.add(childId);
       let fd = tree[childId];
 
@@ -695,6 +866,7 @@ class TFViewer extends Viewer {
     }
     for (let childId in this._lastTree) {
       if (!this.visibleChildFrames.has(childId)) continue;
+      if (!this.showMarkerFrames && this._markerFrames.has(childId)) continue;
       usedLabels.add(childId);
       this._setLabel(childId, this._project3DTo2D(this._lastTree[childId].position), "#ccc");
     }
@@ -724,17 +896,35 @@ class TFViewer extends Viewer {
         "padding-bottom": "2px",
       }).appendTo(this.labelsOverlay);
     }
-    this.labelElements[name].text(name).css({
+    // gz frames look like "x500_obrik_base_battery_0/.../obrik_rangefinder_down"
+    this.labelElements[name].text(name.split("/").pop()).css({
       "display": "", "left": screenPos.x + "%", "top": screenPos.y + "%",
     });
   }
 
   // ── Data Handler ───────────────────────────────────────────
 
+  /**
+   * TF must not be thinned out on the client: rosboard already rate-limits
+   * the snapshots, and a dropped /tf_static delta would never come back.
+   * Paused = keep collecting, just don't redraw.
+   */
+  update(data) {
+    if (this.loaderContainer) {
+      this.loaderContainer.remove();
+      this.loaderContainer = null;
+    }
+    if (data._error) { this.error(data._error); return; }
+    this.onData(data);
+  }
+
   onData(msg) {
     this._lastMsg = msg;
-    this.card.title.text(msg._topic_name);
+    this.card.title.text(this._companionTopic ? msg._topic_name + " + " + this._companionTopic : msg._topic_name);
+    this._ingestTF(msg);
+  }
 
+  _ingestTF(msg) {
     let transforms = msg.transforms || [];
     if (!Array.isArray(transforms) || transforms.length === 0) return;
 
@@ -750,15 +940,29 @@ class TFViewer extends Viewer {
       }
       this._updateChildFramesList();
     }
-    this._updateDisplay();
+    this._needsUpdate = true;
+  }
+
+  /** Orbit target and camera follow base_link (orbit mode only). */
+  _followBaseLink() {
+    let fd = this._lastTree && this._lastTree['base_link'];
+    if (!fd || this.cameraMode !== 'orbit') return;
+    let delta = fd.position.clone().sub(this.orbitControls.target);
+    if (delta.lengthSq() < 1e-8) return;
+    this.orbitControls.target.add(delta);
+    this.camera.position.add(delta);
   }
 
   // ── Cleanup ────────────────────────────────────────────────
 
   destroy() {
-    // Unsubscribe secondary topics
-    for (let i = 0; i < this._arucoTopicNames.length; i++) {
-      Viewer.unsubscribeSecondary(this._arucoTopicNames[i]);
+    // Unsubscribe secondary topics (only our own handlers)
+    for (let topicName in this._arucoTopics) {
+      Viewer.unsubscribeSecondary(topicName, this._arucoTopics[topicName]);
+    }
+    this._arucoTopics = {};
+    if (this._companionTopic && this._onCompanionMsg) {
+      Viewer.unsubscribeSecondary(this._companionTopic, this._onCompanionMsg);
     }
     if (this._arucoDiscoveryInterval) clearInterval(this._arucoDiscoveryInterval);
 

@@ -225,7 +225,13 @@ class Subscriber(object):
         self.type = _ros2_type_to_type_name(topic_type)
         self.callback = callback
         self.callback_args = callback_args
-        self.qos_profile = rclpy.qos.QoSProfile(depth = 10, history = rclpy.qos.HistoryPolicy.KEEP_LAST, reliability = rclpy.qos.ReliabilityPolicy.BEST_EFFORT, durability = rclpy.qos.DurabilityPolicy.VOLATILE)
+        # An explicit QoSProfile is honoured (TF topics need TRANSIENT_LOCAL to
+        # receive latched /tf_static); anything else keeps the historical
+        # BEST_EFFORT/VOLATILE default, which matches every publisher.
+        if isinstance(qos, rclpy.qos.QoSProfile):
+            self.qos_profile = qos
+        else:
+            self.qos_profile = rclpy.qos.QoSProfile(depth = qos if isinstance(qos, int) else 10, history = rclpy.qos.HistoryPolicy.KEEP_LAST, reliability = rclpy.qos.ReliabilityPolicy.BEST_EFFORT, durability = rclpy.qos.DurabilityPolicy.VOLATILE)
         self._sub = _node.create_subscription(topic_type, topic_name, self._ros2_callback, self.qos_profile, event_callbacks = SubscriptionEventCallbacks())
         _node.guards
         self.get_num_connections = lambda: 1 # No good ROS2 equivalent

@@ -1,18 +1,21 @@
 "use strict";
 
-// ArucoMarkerPlugin — renders ArUco markers with proper black/white pattern textures.
-// Data format (aruco_det_loc/msg/MarkerArray):
-//   { header, markers: [{ id, size, pose: {position, orientation}, corners: [Point32 x4] }] }
+// ArucoMarkerPlugin — renders ArUco markers as textured planes with the real
+// DICT_4X4_1000 pattern (ArucoDictionary.js), plus an id label.
 //
-// Each marker is displayed as a textured plane with the ArUco grid pattern,
-// positioned and oriented via pose, plus an ID label overhead.
+// Markers come from several sources at once — the main map, extra maps
+// (aruco_land_1, ...), live detections — and each source owns its own set:
+// updateMarkers(markers, source) only shows/hides markers of that source.
+// (Before, every MarkerArray replaced the whole set, so /aruco/det/markers,
+// /aruco/map/markers and /aruco/aruco_land_1/map/markers blanked each other
+// out in turn and the map flickered between 9, 41 and 59 markers.)
 //
-// `pose` is optional. On /aruco/det/markers it is present only on frames where
-// per-marker PnP actually ran (capped by pnp_fps_cap, 10 Hz by default) and for
-// markers selected by publish_non_map_marker_poses/non_map_pose_ids; map markers
-// never carry one there. Everything else arrives with a zero quaternion meaning
-// "no pose". Markers are rendered only once a usable pose has been seen, and
-// they hold that pose through the gaps between solves.
+// Marker format (already transformed into the viewer's root frame):
+//   { id, size, pose: {position, orientation} }
+// A marker without a usable pose is skipped unless it was placed before, in
+// which case it holds its last pose (see TFUtils.isPoseUsable).
+//
+// setDetected(ids) highlights the markers the camera sees right now.
 
 class ArucoMarkerPlugin {
   /**
@@ -28,25 +31,27 @@ class ArucoMarkerPlugin {
     this.group = new THREE.Group();
     this.scene.add(this.group);
 
-    this._markerObjects = {};   // id → { smooth, mesh, border, axes, ... }
+    this._markerObjects = {};   // "source|id" → { smooth, mesh, halo, ... }
     this._textureCache = {};    // id → THREE.CanvasTexture
     this._labelElements = {};   // key → jQuery element
-    this._lastMarkers = [];
+    this._placed = {};          // source → [{ key, id, pose }]
+    this._detected = new Set(); // ids seen by the camera right now
+    this._highlight = true;     // colour the detected ones (UI checkbox)
     this._visible = true;
-    this._smoothSpeed = 14;     // SmoothTransform speed for markers (camera data is noisy)
+    this._smoothSpeed = 14;     // SmoothTransform speed (map offset moves a bit)
   }
 
   // ── ArUco Texture Generation ─────────────────────────────
 
   /**
-   * Generate a 6×6 ArUco-style pattern (4×4 data grid + 1-cell black border).
-   * Uses the binary representation of the marker ID for the inner cells.
+   * 6×6 cells: 1-cell black border + 4×4 data from DICT_4X4_1000. Ids outside
+   * the dictionary fall back to a hash pattern so they still look distinct.
    */
   _generateArucoTexture(id) {
     if (this._textureCache[id]) return this._textureCache[id];
 
-    let gridSize = 6;    // 4×4 data + 1-cell border on each side
-    let cellPx = 40;     // pixels per cell
+    let gridSize = 6;
+    let cellPx = 32;
     let canvasSize = gridSize * cellPx;
 
     let canvas = document.createElement('canvas');
@@ -54,190 +59,178 @@ class ArucoMarkerPlugin {
     canvas.height = canvasSize;
     let ctx = canvas.getContext('2d');
 
-    // White background
-    ctx.fillStyle = '#ffffff';
+    ctx.fillStyle = '#000000';
     ctx.fillRect(0, 0, canvasSize, canvasSize);
 
-    // Black border ring (outermost cells)
-    ctx.fillStyle = '#000000';
-    for (let i = 0; i < gridSize; i++) {
-      // Top row
-      ctx.fillRect(i * cellPx, 0, cellPx, cellPx);
-      // Bottom row
-      ctx.fillRect(i * cellPx, (gridSize - 1) * cellPx, cellPx, cellPx);
-      // Left column
-      ctx.fillRect(0, i * cellPx, cellPx, cellPx);
-      // Right column
-      ctx.fillRect((gridSize - 1) * cellPx, i * cellPx, cellPx, cellPx);
-    }
-
-    // Inner 4×4 data cells — deterministic pattern from marker ID
-    let bits = this._idToBitPattern(id);
+    let bits = (typeof ArucoDictionary !== 'undefined' && ArucoDictionary.bits(id)) || this._hashBits(id);
+    ctx.fillStyle = '#ffffff';
     for (let row = 0; row < 4; row++) {
       for (let col = 0; col < 4; col++) {
-        ctx.fillStyle = bits[row * 4 + col] ? '#000000' : '#ffffff';
-        ctx.fillRect((col + 1) * cellPx, (row + 1) * cellPx, cellPx, cellPx);
+        if (!bits[row * 4 + col]) {
+          ctx.fillRect((col + 1) * cellPx, (row + 1) * cellPx, cellPx, cellPx);
+        }
       }
     }
 
-    // ID number in the center (small, semi-transparent, for quick identification)
-    ctx.fillStyle = 'rgba(0, 200, 100, 0.7)';
-    ctx.font = 'bold ' + (cellPx * 1.2) + 'px monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
-    ctx.lineWidth = 3;
-    ctx.strokeText(String(id), canvasSize / 2, canvasSize / 2);
-    ctx.fillText(String(id), canvasSize / 2, canvasSize / 2);
-
     let texture = new THREE.CanvasTexture(canvas);
     texture.magFilter = THREE.NearestFilter;
-    texture.minFilter = THREE.NearestFilter;
+    texture.minFilter = THREE.LinearFilter;
     texture.generateMipmaps = false;
 
     this._textureCache[id] = texture;
     return texture;
   }
 
-  /**
-   * Convert marker ID to a 16-bit pattern for the 4×4 inner grid.
-   * Uses a simple hash-like mixing to produce a distinct pattern per ID.
-   */
-  _idToBitPattern(id) {
-    // Mix the ID bits to create a visually distinct pattern for each ID.
-    // Real ArUco dictionaries use Hamming-code-based patterns;
-    // this is a visual approximation that ensures different IDs look different.
-    let v = ((id + 1) * 2654435761) >>> 0;  // Knuth multiplicative hash
+  _hashBits(id) {
+    let v = ((Number(id) + 1) * 2654435761) >>> 0;
     let bits = [];
-    for (let i = 0; i < 16; i++) {
-      bits.push((v >> i) & 1);
-    }
-    // Ensure at least some black and some white cells for visual variety
-    let sum = bits.reduce((a, b) => a + b, 0);
-    if (sum < 3) { bits[0] = 1; bits[5] = 1; bits[10] = 1; }
-    if (sum > 13) { bits[3] = 0; bits[7] = 0; bits[12] = 0; }
+    for (let i = 0; i < 16; i++) bits.push((v >> i) & 1);
     return bits;
   }
 
   // ── Marker mesh creation ───────────────────────────────────
 
-  _getOrCreateMarker(id, size) {
-    if (this._markerObjects[id]) return this._markerObjects[id];
-
+  _getOrCreateMarker(key, id, size) {
+    let obj = this._markerObjects[key];
     let markerSize = size || 0.15;
+    if (obj && Math.abs(obj.size - markerSize) < 1e-6) return obj;
+    if (obj) this._disposeMarker(key);
+
     let smooth = new SmoothTransform(this.group, { speed: this._smoothSpeed, snapDistance: 1.5 });
 
-    // ArUco textured plane
-    let texture = this._generateArucoTexture(id);
+    // Lifted a few mm above the marker frame: the ground grid lies at z=0 and
+    // would z-fight with a plane exactly on it.
     let geo = new THREE.PlaneGeometry(markerSize, markerSize);
-    let mat = new THREE.MeshBasicMaterial({
-      map: texture,
-      side: THREE.DoubleSide,
-    });
+    let mat = new THREE.MeshBasicMaterial({ map: this._generateArucoTexture(id), side: THREE.DoubleSide });
     let mesh = new THREE.Mesh(geo, mat);
+    mesh.position.z = 0.004;
     smooth.group.add(mesh);
 
-    // Green border outline
-    let borderPoints = [
-      new THREE.Vector3(-markerSize / 2, -markerSize / 2, 0),
-      new THREE.Vector3( markerSize / 2, -markerSize / 2, 0),
-      new THREE.Vector3( markerSize / 2,  markerSize / 2, 0),
-      new THREE.Vector3(-markerSize / 2,  markerSize / 2, 0),
-    ];
-    let borderGeo = new THREE.BufferGeometry().setFromPoints(borderPoints);
-    let borderMat = new THREE.LineBasicMaterial({ color: 0x44ff88, linewidth: 2 });
-    let border = new THREE.LineLoop(borderGeo, borderMat);
-    smooth.group.add(border);
+    // Highlight frame behind the marker, shown while the camera sees it.
+    // (WebGL ignores LineBasicMaterial.linewidth, so a plane reads better.)
+    let haloGeo = new THREE.PlaneGeometry(markerSize * 1.18, markerSize * 1.18);
+    let haloMat = new THREE.MeshBasicMaterial({ color: 0x2bd46b, side: THREE.DoubleSide });
+    let halo = new THREE.Mesh(haloGeo, haloMat);
+    halo.position.z = 0.002;
+    halo.visible = false;
+    smooth.group.add(halo);
 
-    // Mini axes at marker center (shows orientation)
-    let axes = new THREE.AxesHelper(markerSize * 0.6);
-    smooth.group.add(axes);
-
-    let obj = {
-      smooth, mesh, border, axes, geo, mat, texture, size: markerSize,
-      hasPose: false,   // a usable pose has been received at least once
-      lastPose: null,   // last usable pose, held across frames without PnP
+    obj = {
+      smooth, mesh, halo, geo, mat, haloGeo, haloMat, id, size: markerSize,
+      hasPose: false,
+      lastPose: null,
     };
-    this._markerObjects[id] = obj;
+    this._markerObjects[key] = obj;
     return obj;
+  }
+
+  _disposeMarker(key) {
+    let obj = this._markerObjects[key];
+    if (!obj) return;
+    obj.geo.dispose(); obj.mat.dispose();
+    obj.haloGeo.dispose(); obj.haloMat.dispose();
+    obj.smooth.destroy();
+    delete this._markerObjects[key];
   }
 
   // ── Update from topic data ─────────────────────────────────
 
   /**
-   * @param {Array} markers - array of { id, size, pose, corners }
+   * Replace the markers of one source. An empty array hides that source
+   * (e.g. its frame is not connected to the TF tree yet).
+   * @param {Array} markers - [{ id, size, pose }] in the root frame
+   * @param {string} source - topic name or any stable key
    */
-  updateMarkers(markers) {
+  updateMarkers(markers, source = "default") {
     if (!Array.isArray(markers)) return;
 
-    let activeIds = new Set();
+    let active = new Set();
     let placed = [];
 
     for (let i = 0; i < markers.length; i++) {
       let m = markers[i];
-      if (m.id == null) continue;
+      if (m == null || m.id == null) continue;
+      let key = source + "|" + m.id;
 
-      // Detection without a pose: either PnP is disabled for this marker, or
-      // this frame fell between two solves (pnp_fps_cap). See
-      // TFUtils.isPoseUsable. Such a marker has no place in a 3D scene — the
-      // old code dropped it on the world origin.
       let usable = TFUtils.isPoseUsable(m.pose);
-      let known = this._markerObjects[m.id];
+      let known = this._markerObjects[key];
       if (!usable && !(known && known.hasPose)) continue;
 
-      activeIds.add(m.id);
-      let obj = this._getOrCreateMarker(m.id, m.size);
-
-      // Set target pose (SmoothTransform will interpolate in updateSmooth).
-      // Frames without a fresh solve keep the last known pose instead of
-      // blinking the marker out — the gaps are expected, not a loss of track.
+      let obj = this._getOrCreateMarker(key, m.id, m.size);
       if (usable) {
         obj.smooth.setTarget(m.pose.position, m.pose.orientation);
         obj.lastPose = m.pose;
         obj.hasPose = true;
       }
-
-      obj.smooth.group.visible = this._visible;
-      placed.push({ id: m.id, size: m.size, pose: obj.lastPose });
+      // Recreated for a new size without a pose in this message: nothing to place.
+      if (!obj.hasPose) continue;
+      active.add(key);
+      placed.push({ key, id: m.id, pose: obj.lastPose });
     }
 
-    // Labels follow what is actually rendered, not what arrived.
-    this._lastMarkers = placed;
+    this._placed[source] = placed;
 
-    // Hide markers that are no longer present
-    for (let id in this._markerObjects) {
-      if (!activeIds.has(Number(id)) && !activeIds.has(id)) {
-        this._markerObjects[id].smooth.group.visible = false;
-      }
+    for (let key in this._markerObjects) {
+      if (!key.startsWith(source + "|")) continue;
+      this._markerObjects[key].smooth.group.visible = this._visible && active.has(key);
     }
+    this._applyDetected();
+  }
+
+  /** Ids the camera sees right now (highlighted on every source). */
+  setDetected(ids) {
+    this._detected = new Set(Array.from(ids || []).map(Number));
+    this._applyDetected();
+  }
+
+  /** Turn the green highlight of detected markers on/off. */
+  setHighlightEnabled(enabled) {
+    this._highlight = !!enabled;
+    this._applyDetected();
+  }
+
+  _isHighlighted(id) {
+    return this._highlight && this._detected.has(Number(id));
+  }
+
+  _applyDetected() {
+    for (let key in this._markerObjects) {
+      let obj = this._markerObjects[key];
+      obj.halo.visible = this._isHighlighted(obj.id);
+    }
+  }
+
+  /** Ids currently placed by any source except the given one. */
+  placedIdsExcept(source) {
+    let ids = new Set();
+    for (let s in this._placed) {
+      if (s === source) continue;
+      this._placed[s].forEach((p) => ids.add(Number(p.id)));
+    }
+    return ids;
   }
 
   // ── Labels (HTML overlay) ──────────────────────────────────
 
   updateLabels() {
     if (!this.labelsOverlay || !this._visible) {
-      for (let key in this._labelElements) {
-        this._labelElements[key].css("display", "none");
-      }
+      for (let key in this._labelElements) this._labelElements[key].css("display", "none");
       return;
     }
 
     let activeKeys = new Set();
-
-    for (let i = 0; i < this._lastMarkers.length; i++) {
-      let m = this._lastMarkers[i];
-      if (m.id == null || !m.pose || !m.pose.position) continue;
-
-      let key = "aruco_" + m.id;
-      activeKeys.add(key);
-
-      let p = m.pose.position;
-      // Label slightly above the marker
-      let screenPos = this._project3DTo2D(p.x || 0, p.y || 0, (p.z || 0) + 0.12);
-      this._setLabel(key, m.id, screenPos);
+    for (let source in this._placed) {
+      let list = this._placed[source];
+      for (let i = 0; i < list.length; i++) {
+        let m = list[i];
+        if (!m.pose || !m.pose.position) continue;
+        activeKeys.add(m.key);
+        let p = m.pose.position;
+        let screenPos = this._project3DTo2D(p.x || 0, p.y || 0, (p.z || 0) + 0.05);
+        this._setLabel(m.key, m.id, screenPos, this._isHighlighted(m.id));
+      }
     }
 
-    // Remove unused labels
     for (let key in this._labelElements) {
       if (!activeKeys.has(key)) {
         this._labelElements[key].remove();
@@ -250,13 +243,10 @@ class ArucoMarkerPlugin {
     let v = new THREE.Vector3(x, y, z);
     v.project(this.camera);
     if (Math.abs(v.x) > 2 || Math.abs(v.y) > 2 || v.z > 1) return null;
-    return {
-      x: (v.x * 0.5 + 0.5) * 100,
-      y: (-v.y * 0.5 + 0.5) * 100,
-    };
+    return { x: (v.x * 0.5 + 0.5) * 100, y: (-v.y * 0.5 + 0.5) * 100 };
   }
 
-  _setLabel(key, id, screenPos) {
+  _setLabel(key, id, screenPos, detected) {
     if (!screenPos) {
       if (this._labelElements[key]) this._labelElements[key].css("display", "none");
       return;
@@ -264,29 +254,27 @@ class ArucoMarkerPlugin {
     if (!this._labelElements[key]) {
       this._labelElements[key] = $('<div></div>').css({
         "position": "absolute",
-        "font-size": "8px",
         "font-family": "'JetBrains Mono', monospace",
-        "color": "rgba(180,190,200,0.6)",
-        "text-shadow": "0 0 2px rgba(0,0,0,0.8)",
         "white-space": "nowrap",
         "pointer-events": "none",
-        "transform": "translate(4px, -50%)",
+        "transform": "translate(-50%, -50%)",
       }).appendTo(this.labelsOverlay);
     }
-    this._labelElements[key].text("id:" + id).css({
+    this._labelElements[key].text(String(id)).css({
       "display": "",
       "left": screenPos.x + "%",
       "top": screenPos.y + "%",
+      "font-size": detected ? "11px" : "9px",
+      "font-weight": detected ? "700" : "400",
+      "color": detected ? "#5dff9a" : "rgba(210,220,230,0.75)",
+      "text-shadow": "0 0 3px #000, 0 0 5px #000",
     });
   }
 
   // ── Smooth update (call every frame from render loop) ─────
 
-  /** Interpolate all markers towards targets. Call from render loop. */
   updateSmooth(dt) {
-    for (let id in this._markerObjects) {
-      this._markerObjects[id].smooth.update(dt);
-    }
+    for (let key in this._markerObjects) this._markerObjects[key].smooth.update(dt);
   }
 
   // ── Public API ─────────────────────────────────────────────
@@ -295,40 +283,16 @@ class ArucoMarkerPlugin {
     this._visible = !!visible;
     this.group.visible = this._visible;
     if (!this._visible) {
-      for (let key in this._labelElements) {
-        this._labelElements[key].css("display", "none");
-      }
+      for (let key in this._labelElements) this._labelElements[key].css("display", "none");
     }
   }
 
   destroy() {
-    // Remove 3D objects
-    for (let id in this._markerObjects) {
-      let obj = this._markerObjects[id];
-      if (obj.geo) obj.geo.dispose();
-      if (obj.mat) obj.mat.dispose();
-      if (obj.texture) obj.texture.dispose();
-      if (obj.border) {
-        obj.border.geometry.dispose();
-        obj.border.material.dispose();
-      }
-      if (obj.axes) obj.axes.dispose();
-      obj.smooth.destroy();
-    }
-    this._markerObjects = {};
-
-    // Dispose cached textures
-    for (let id in this._textureCache) {
-      this._textureCache[id].dispose();
-    }
+    for (let key in this._markerObjects) this._disposeMarker(key);
+    for (let id in this._textureCache) this._textureCache[id].dispose();
     this._textureCache = {};
-
     this.scene.remove(this.group);
-
-    // Remove labels
-    for (let key in this._labelElements) {
-      this._labelElements[key].remove();
-    }
+    for (let key in this._labelElements) this._labelElements[key].remove();
     this._labelElements = {};
   }
 }

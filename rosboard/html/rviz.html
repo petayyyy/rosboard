@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <title>RViz — TF</title>
+
+  <!-- Same libraries as index.html, all local (no internet on the drone's Wi-Fi) -->
+  <link href="css/material-icons.css" rel="stylesheet" type="text/css">
+  <link rel="stylesheet" href="css/material.indigo-blue.min.css">
+  <link href="css/index.css" rel="stylesheet" type="text/css">
+  <script src="js/jquery-3.1.0.min.js"></script>
+  <script src="js/json5.min.js"></script>
+  <script src="js/import-helper.js"></script>
+  <script src="js/material.min.js"></script>
+  <script src="js/vendor/three/three.min.js"></script>
+  <script src="js/vendor/three/fflate.min.js"></script>
+  <script src="js/vendor/three/OrbitControls.js"></script>
+  <script src="js/vendor/three/FBXLoader.js"></script>
+
+  <style>
+    /* One TFViewer card stretched over the whole window: the canvas takes
+       everything below the controls (instead of the 1:1 box of a card). */
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #1a1a2e; }
+    body { position: static; }
+    .card.rviz-card {
+      position: fixed; inset: 0; margin: 0; width: auto; border-radius: 0;
+      display: flex; flex-direction: column; box-shadow: none;
+    }
+    .rviz-card .card-title { padding: 6pt 10pt 2pt; font-size: 10pt; }
+    .rviz-card .card-buttons,
+    .rviz-card > .mdl-menu__container { display: none; }
+    .rviz-card .card-content {
+      flex: 1; min-height: 0; max-height: none !important;
+      overflow: hidden !important; padding: 0 8px 6px;
+      display: flex; flex-direction: column;
+    }
+    .rviz-card .tf-wrap { flex: 1; min-height: 0; display: flex; }
+    .rviz-card .tf-canvas-wrap { height: 100% !important; border-radius: 4px; }
+    .rviz-offline {
+      position: fixed; top: 8px; right: 12px; z-index: 20; display: none;
+      font: 11px 'JetBrains Mono', monospace; color: #ffb35c;
+      background: rgba(0,0,0,0.55); padding: 3px 8px; border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card rviz-card" id="rviz-card"></div>
+  <div class="rviz-offline" id="rviz-offline">нет связи с rosboard — переподключение…</div>
+  <script src="js/rviz.js"></script>
+</body>
+</html>

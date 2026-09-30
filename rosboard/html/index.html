@@ -21,11 +21,13 @@
 	      <script type="text/javascript" src="js/gl-matrix.js"></script>
 	      <script type="text/javascript" src="js/litegl.min.js"></script>
 
-        <!-- Three.js r147 (TFViewer 3D) -->
-        <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/build/three.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/libs/fflate.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/controls/OrbitControls.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/loaders/FBXLoader.js"></script>
+        <!-- Three.js r147 (TFViewer 3D). Local copies, not a CDN: the laptop on
+             the drone's Wi-Fi usually has no internet, and TFViewer is dead
+             without them. -->
+        <script src="js/vendor/three/three.min.js"></script>
+        <script src="js/vendor/three/fflate.min.js"></script>
+        <script src="js/vendor/three/OrbitControls.js"></script>
+        <script src="js/vendor/three/FBXLoader.js"></script>
 
         <script type="text/javascript" src="js/index.js" defer></script>
 

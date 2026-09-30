@@ -103,7 +103,11 @@ class ROSBoardSocketHandler(tornado.websocket.WebSocketHandler):
                     if socket.id not in socket.node.remote_subs[topic_name]:
                         continue
                     t = time.time()
-                    if t - socket.last_data_times_by_topic.get(topic_name, 0.0) < \
+                    # TF snapshots are already rate-limited by the node and
+                    # carry the full state, so a per-socket drop would lose
+                    # static frames that are not re-sent until they change.
+                    if not message[1].get("_tf_snapshot") and \
+                            t - socket.last_data_times_by_topic.get(topic_name, 0.0) < \
                             socket.update_intervals_by_topic.get(topic_name) - 2e-4:
                         continue
                     if socket.ws_connection and not socket.ws_connection.is_closing():
@@ -174,6 +178,14 @@ class ROSBoardSocketHandler(tornado.websocket.WebSocketHandler):
 
             self.node.remote_subs[topic_name].add(self.id)
             self.node.sync_subs()
+
+            # A client joining an already-subscribed TF topic would otherwise
+            # never see static transforms (latched messages were delivered to
+            # rosboard long ago): send it the cached state right away.
+            snapshot = self.node.tf_snapshot_msg(topic_name) if hasattr(self.node, "tf_snapshot_msg") else None
+            if snapshot is not None and self.ws_connection and not self.ws_connection.is_closing():
+                self.write_message(json.dumps(
+                    [ROSBoardSocketHandler.MSG_MSG, snapshot], separators=(',', ':')))
 
         # client wants to unsubscribe from topic
         elif argv[0] == ROSBoardSocketHandler.MSG_UNSUB:
